@@ -1,0 +1,19 @@
+node_modules/
+.nuxt/
+.output/
+.data/
+dist/
+data/
+fonts/
+*.log
+.env
+.DS_Store
+test-results/
+playwright-report/
+tests/.tmp/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
