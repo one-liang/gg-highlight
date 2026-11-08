@@ -153,6 +153,25 @@ describe('preparePreview (real ffmpeg)', () => {
     expect(preview.audioTracks.map(t => t.codec)).toEqual(['aac'])
   })
 
+  it('remuxes a webm-style mkv (vp9 + opus) to mp4 keeping both codecs', async () => {
+    const dir = await makeTmpDir()
+    const src = path.join(dir, 'vp9.mkv')
+    const r = spawnSync('ffmpeg', ['-v', 'error', '-y',
+      '-f', 'lavfi', '-i', 'testsrc2=size=320x240:rate=30:duration=1',
+      '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1',
+      '-c:v', 'libvpx-vp9', '-deadline', 'realtime', '-c:a', 'libopus', '-shortest', src], { encoding: 'utf8' })
+    expect(r.status, r.stderr).toBe(0)
+    const info = await probeMedia(tools, src)
+    expect(previewPlan(info)).toBe('remux')
+    const out = path.join(dir, 'preview.mp4')
+    await preparePreview(tools, { filePath: src, media: info }, out)
+    const preview = await probeMedia(tools, out)
+    expect(preview.container).toContain('mp4')
+    expect(preview.videoCodec).toBe('vp9')
+    expect(preview.audioTracks.map(t => t.codec)).toEqual(['opus'])
+    expect(previewPlan(preview)).toBe('original')
+  })
+
   it('transcodes an unsupported codec to ≤720p h264 + aac', async () => {
     const info = await probeMedia(tools, mpeg4Mkv)
     expect(info.videoCodec).toBe('mpeg4')
@@ -168,6 +187,21 @@ describe('preparePreview (real ffmpeg)', () => {
     expect(a.codec_name).toBe('aac')
     expect(Number(raw.format.duration)).toBeCloseTo(2, 0)
     expect(seen.at(-1)).toBe(1)
+  })
+
+  it('transcodes a rotated, silent source upright (fake MediaInfo forces the transcode path)', async () => {
+    const dir = await makeTmpDir()
+    const rotated = path.join(dir, 'rotated.mp4')
+    const r = spawnSync('ffmpeg', ['-v', 'error', '-y', '-display_rotation', '90', '-i', fx.noAudioMp4, '-c', 'copy', '-t', '1', rotated], { encoding: 'utf8' })
+    expect(r.status, r.stderr).toBe(0)
+    const info = { ...await probeMedia(tools, rotated), videoCodec: 'hevc' }
+    expect(info).toMatchObject({ width: 360, height: 640, audioTracks: [] })
+    expect(previewPlan(info)).toBe('transcode')
+    const out = path.join(dir, 'preview.mp4')
+    await preparePreview(tools, { filePath: rotated, media: info }, out, { encoder: 'libx264' })
+    const raw = rawProbe(out)
+    expect(raw.streams.map(s => s.codec_type)).toEqual(['video'])
+    expect(raw.streams[0]).toMatchObject({ codec_name: 'h264', width: 360, height: 640 })
   })
 
   it('detects the encoder when none is given (libx264 here)', async () => {

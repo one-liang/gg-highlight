@@ -1,5 +1,6 @@
 // Spawning ffmpeg/ffprobe: stderr tail, `-progress` parsing, abort (with process-tree kill on Windows).
 import { spawn, type ChildProcess } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import type { MediaTools, RunOptions } from './types'
 
 export const STDERR_TAIL_CHARS = 4096
@@ -81,6 +82,9 @@ function killTree(child: ChildProcess) {
     // ffmpeg may be wrapped (e.g. by a shim); /T kills the whole tree, /F forces it.
     const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
     killer.on('error', () => child.kill())
+    killer.on('exit', (code) => {
+      if (code !== 0 && child.exitCode === null) child.kill()
+    })
   }
   else {
     child.kill('SIGKILL')
@@ -140,6 +144,8 @@ export function runTool(command: string, args: string[], opts: ProcessOptions = 
     })
     child.on('error', (err: NodeJS.ErrnoException) => {
       if (aborted) return finish(abortError())
+      // Node reports a missing cwd as ENOENT of the command too.
+      if (err.code === 'ENOENT' && cwd && !existsSync(cwd)) return finish(new Error(`無法執行 ${command}：工作資料夾不存在（${cwd}）`))
       const reason = err.code === 'ENOENT' ? '找不到執行檔' : err.message
       finish(new Error(`無法執行 ${command}：${reason}`))
     })
@@ -155,7 +161,7 @@ export function runTool(command: string, args: string[], opts: ProcessOptions = 
 
 /**
  * Runs ffmpeg with `-hide_banner -nostdin -y -v error` prepended. With onProgress + durationSec it
- * adds `-progress pipe:1 -nostats` and reports a monotonic 0–1 fraction (1 on success).
+ * adds `-progress pipe:1 -nostats` and reports a monotonic 0–1 fraction. onProgress always gets 1 on success.
  */
 export async function runFfmpeg(tools: MediaTools, args: string[], opts: RunOptions = {}): Promise<void> {
   const { onProgress, durationSec } = opts
@@ -170,5 +176,6 @@ export async function runFfmpeg(tools: MediaTools, args: string[], opts: RunOpti
     signal: opts.signal,
     onStdout: progress ? chunk => progress.push(chunk) : undefined,
   })
-  progress?.finish()
+  if (progress) progress.finish()
+  else if (onProgress) createProgressParser(1, onProgress).finish()
 }

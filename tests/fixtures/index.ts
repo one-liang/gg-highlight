@@ -1,5 +1,4 @@
 // Typed access to the generated media fixtures (see make-fixtures.mjs).
-// @ts-expect-error -- plain ESM helper without type declarations
 import { makeFixtures as make } from './make-fixtures.mjs'
 
 export interface Fixtures {

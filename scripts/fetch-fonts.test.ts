@@ -326,6 +326,8 @@ describe('CLI', () => {
       expect(code).toBe(1)
       expect(errors.join('\n')).toMatch(/請手動下載/)
       expect(errors.join('\n')).toContain(fontsDir)
+      // the download error is logged once, not repeated with the instructions
+      expect(errors.join('\n')).not.toMatch(/下載失敗/)
     }
     finally {
       spy.mockRestore()

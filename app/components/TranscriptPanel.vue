@@ -169,7 +169,8 @@ function cancelEdit() {
   editError.value = null
 }
 
-async function saveEdit() {
+/** `fromKeyboard`: refocus the editor after a failed save (not after a blur-triggered save). */
+async function saveEdit(fromKeyboard = true) {
   const idx = editingIdx.value
   if (idx === null || saving.value) return
   const seg = props.segments.find(s => s.idx === idx)
@@ -199,6 +200,8 @@ async function saveEdit() {
   }
   catch (err) {
     editError.value = apiErrorMessage(err, '儲存失敗')
+    // keep Enter / Esc working without another click
+    if (fromKeyboard && editingIdx.value === idx) editorEl?.focus()
   }
   finally {
     saving.value = false
@@ -230,7 +233,7 @@ function onEditBlur() {
   if (editingIdx.value === null || saving.value) return
   const seg = props.segments.find(s => s.idx === editingIdx.value)
   if (!seg || draft.value.trim() === seg.text) cancelEdit()
-  else void saveEdit()
+  else void saveEdit(false)
 }
 </script>
 
@@ -325,9 +328,10 @@ function onEditBlur() {
               :ref="setEditor"
               :value="draft"
               rows="1"
-              :disabled="saving"
+              :readonly="saving"
+              :aria-busy="saving || undefined"
               aria-label="修改這段逐字稿"
-              class="block w-full resize-none rounded-md bg-default px-2 py-1 text-sm leading-relaxed text-highlighted ring ring-primary focus:outline-none disabled:opacity-70"
+              class="block w-full resize-none rounded-md bg-default px-2 py-1 text-sm leading-relaxed text-highlighted ring ring-primary focus:outline-none read-only:opacity-70"
               :class="editError ? 'ring-error' : ''"
               @input="onEditInput"
               @keydown="onEditKeydown"

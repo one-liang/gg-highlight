@@ -18,6 +18,7 @@ import {
   probeServer,
   serverEnv,
   STAMP_FILE,
+  stopExitCode,
   urlHost,
   waitForServer,
   writeBuildStamp,
@@ -146,6 +147,13 @@ describe('settings', () => {
     expect(serverEnv({ NODE_OPTIONS: env.NODE_OPTIONS }).NODE_OPTIONS).toBe(env.NODE_OPTIONS)
     expect(serverEnv({}).NODE_OPTIONS).toBe('--disable-warning=ExperimentalWarning')
     expect(serverEnv({ PORT: '5000', HOST: 'localhost' })).toMatchObject({ PORT: '5000', HOST: 'localhost' })
+  })
+
+  it('treats being ended by the stop request as a clean exit', () => {
+    expect(stopExitCode(0)).toBe(0)
+    expect(stopExitCode(null)).toBe(0)
+    expect(stopExitCode(0xC000013A)).toBe(0)
+    expect(stopExitCode(2)).toBe(2)
   })
 
   it('opens the browser per platform', () => {

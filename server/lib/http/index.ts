@@ -65,13 +65,31 @@ export async function serveFile(event: H3Event, filePath: string, opts: ServeFil
     if (opts.downloadName) setResponseHeader(event, 'Content-Disposition', contentDisposition(opts.downloadName, true))
 
     if (event.method === 'HEAD' || size === 0) return await send(event, '')
+    if (res.destroyed) {
+      // The client went away while the file was being opened.
+      event._handled = true
+      return
+    }
 
     const stream = fs.createReadStream(filePath, { fd: handle, start, end, autoClose: true })
     streaming = true
-    // A seeking <video> aborts many requests; release the file right away (Windows can't delete open files).
-    if (res.socket) res.once('close', () => stream.destroy())
+    const sending = [sendStream(event, stream)]
+    // A seeking <video> aborts many requests: release the file right away (Windows can't delete open
+    // files) and settle ourselves, because sendStream only resolves on 'end' and a destroyed stream never ends.
+    if (res.socket) {
+      sending.push(new Promise<void>((resolve) => {
+        res.once('close', () => {
+          if (!res.writableFinished) {
+            stream.destroy()
+            // Keeps h3 from answering the aborted request with its fallback 404.
+            event._handled = true
+          }
+          resolve()
+        })
+      }))
+    }
     try {
-      return await sendStream(event, stream)
+      return await Promise.race(sending)
     }
     catch (err) {
       stream.destroy()

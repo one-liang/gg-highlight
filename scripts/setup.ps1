@@ -22,7 +22,8 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $Root
 
-$MinNodeVersion = [version]'22.12.0'
+# node:sqlite loads without a flag only from 22.13 on.
+$MinNodeVersion = [version]'22.13.0'
 $AsrModels = @(
   @{ Id = 'SoybeanMilk/faster-whisper-Breeze-ASR-25'; Name = '中文模型 Breeze-ASR-25（約 3 GB）' },
   @{ Id = 'deepdml/faster-whisper-large-v3-turbo-ct2'; Name = '英文模型 Whisper large-v3-turbo（約 1.6 GB）' }

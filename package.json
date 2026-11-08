@@ -1,5 +1,6 @@
 {
   "name": "gg-highlight",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -31,7 +32,7 @@
     "vue-tsc": "^3.3.13"
   },
   "engines": {
-    "node": ">=22.12"
+    "node": ">=22.13"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

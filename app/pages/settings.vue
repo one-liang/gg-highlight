@@ -254,7 +254,7 @@ async function copyDataDir() {
               <div v-else class="space-y-1.5">
                 <UBadge label="找不到字幕字型" color="error" variant="subtle" icon="i-lucide-circle-alert" />
                 <p class="text-xs leading-relaxed text-muted">
-                  燒錄字幕需要 Noto Sans CJK TC。請在專案資料夾執行 <code class="rounded bg-elevated px-1 py-0.5 font-mono text-highlighted">pnpm fonts</code>，或重新執行安裝腳本 <code class="rounded bg-elevated px-1 py-0.5 font-mono text-highlighted">scripts\setup.ps1</code>，完成後重新整理這一頁。
+                  燒錄字幕需要 Noto Sans CJK TC。請在專案資料夾執行 <code class="rounded bg-elevated px-1 py-0.5 font-mono text-highlighted">pnpm fonts</code>，或重新執行專案資料夾裡的安裝腳本 <code class="rounded bg-elevated px-1 py-0.5 font-mono text-highlighted">setup.bat</code>，完成後重新整理這一頁。
                 </p>
               </div>
             </dd>

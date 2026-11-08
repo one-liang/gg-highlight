@@ -253,6 +253,7 @@ export async function fetchFonts({
     }
     catch (err) {
       errors.push(`複製系統字型失敗：${err.message}`)
+      log(`複製系統字型失敗：${err.message}`)
     }
   }
   return { status: 'missing', file: null, errors }
@@ -309,7 +310,7 @@ export async function main(argv = process.argv.slice(2), opts = {}) {
       console.log(`✅ 已從系統字型複製：${result.file}`)
       return 0
     default:
-      for (const e of result.errors) console.error(`  ${e}`)
+      // result.errors were already printed through log()
       console.error(manualInstructions(fontsDir))
       return 1
   }

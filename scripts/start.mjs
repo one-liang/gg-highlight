@@ -169,6 +169,18 @@ export async function waitForServer(url, { timeoutMs = READY_TIMEOUT_MS, interva
   }
 }
 
+/** Windows exit status of a process ended by Ctrl+C (0xC000013A). */
+export const WIN_CTRL_C_EXIT = 0xC000013A
+
+/**
+ * Exit code after the user asked to stop: the server's own code, except that being ended
+ * by the Ctrl+C itself (signal, or 0xC000013A on Windows) counts as a clean stop.
+ */
+export function stopExitCode(code) {
+  if (code === null || code === undefined || code === WIN_CTRL_C_EXIT) return 0
+  return code
+}
+
 /** Command that opens `url` in the default browser. */
 export function browserCommand(url, platform = process.platform, env = process.env) {
   if (!/^https?:\/\/[A-Za-z0-9.:[\]/-]+$/.test(url)) throw new Error(`Refusing to open unexpected URL: ${url}`)
@@ -333,7 +345,7 @@ export async function main({
     }
     if (stopping) {
       log('▶ gg-highlight 已關閉。')
-      return code ?? 0
+      return stopExitCode(code)
     }
     log(`❌ 伺服器意外結束（${code !== null ? `代碼 ${code}` : `訊號 ${signal}`}）。請看上面的錯誤訊息，或執行 node scripts/doctor.mjs 檢查環境。`)
     return code || 1

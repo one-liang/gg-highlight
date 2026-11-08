@@ -21,6 +21,8 @@ let base: string
 let data: Buffer
 let dataFile: string
 let bigFile: string
+let inFlight = 0
+const appErrors: unknown[] = []
 const SIZE = 100_000
 const DOWNLOAD_NAME = '我的 "精華" 影片_01-05_模糊背景.mp4'
 
@@ -58,15 +60,21 @@ beforeAll(async () => {
     '/dir': dir,
     '/fixture': fixtures().sampleEnMp4,
   }
-  const app = createApp()
-  app.use(eventHandler((event) => {
+  const app = createApp({ onError: err => void appErrors.push(err) })
+  app.use(eventHandler(async (event) => {
     const file = files[event.path.split('?')[0]!]
     if (!file) return
     const query = getQuery(event)
-    return serveFile(event, file, {
-      downloadName: query.download ? DOWNLOAD_NAME : undefined,
-      contentType: typeof query.type === 'string' ? query.type : undefined,
-    })
+    inFlight++
+    try {
+      return await serveFile(event, file, {
+        downloadName: query.download ? DOWNLOAD_NAME : undefined,
+        contentType: typeof query.type === 'string' ? query.type : undefined,
+      })
+    }
+    finally {
+      inFlight--
+    }
   }))
   server = http.createServer(toNodeListener(app))
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
@@ -216,6 +224,28 @@ describe('serveFile', () => {
     expect(res.status).toBe(206)
     expect(res.headers['content-range']).toBe(`bytes 0-7/${fs.statSync(file).size}`)
     expect(res.body.subarray(4, 8).toString('latin1')).toBe('ftyp')
+  })
+
+  it('settles the handler when the client aborts mid-stream', async () => {
+    appErrors.length = 0
+    await new Promise<void>((resolve, reject) => {
+      const req = http.get(`${base}/big`, { agent: false }, (res) => {
+        expect(res.statusCode).toBe(200)
+        res.once('data', () => {
+          req.destroy()
+          resolve()
+        })
+      })
+      req.on('error', (err) => {
+        if ((err as NodeJS.ErrnoException).code !== 'ECONNRESET') reject(err)
+      })
+    })
+
+    // h3's sendStream only resolves on 'end'; a destroyed stream never ends, so serveFile must settle itself.
+    const deadline = Date.now() + 5000
+    while (inFlight > 0 && Date.now() < deadline) await new Promise(r => setTimeout(r, 20))
+    expect(inFlight).toBe(0)
+    expect(appErrors).toEqual([])
   })
 
   it.skipIf(process.platform !== 'linux')('closes the file when the client aborts mid-stream', async () => {

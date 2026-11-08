@@ -83,6 +83,18 @@ describe('runFfmpeg', () => {
     expect(err.message).toContain('無法執行 /no/such/ffmpeg')
   })
 
+  it('still reports 1 on success when no duration is known (no -progress parsing)', async () => {
+    const seen: number[] = []
+    await runFfmpeg(tools, ['-f', 'lavfi', '-i', 'sine=duration=0.2', '-f', 'null', '-'], { onProgress: v => seen.push(v) })
+    expect(seen).toEqual([1])
+  })
+
+  it('reports a missing working folder instead of a missing binary', async () => {
+    const dir = await makeTmpDir()
+    const err = await runFfmpeg(tools, ['-version'], { cwd: path.join(dir, 'gone') }).catch(e => e) as Error
+    expect(err.message).toContain('工作資料夾不存在')
+  })
+
   it('honours cwd for relative output paths', async () => {
     const dir = await makeTmpDir()
     await runFfmpeg(tools, ['-f', 'lavfi', '-i', 'sine=duration=0.2', 'out.wav'], { cwd: dir })

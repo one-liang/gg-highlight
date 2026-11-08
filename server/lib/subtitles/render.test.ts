@@ -11,20 +11,23 @@ import type { SubtitleCanvas } from './index'
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
 const ffmpeg = process.env.GG_FFMPEG ?? 'ffmpeg'
 
-function findFontsDir(): string | null {
+/** Folders holding a Noto CJK font: the app's fonts folder and the system one (a .ttc collection). */
+function findFontsDirs(): string[] {
   const candidates = [
     process.env.GG_FONTS_DIR ? path.resolve(repoRoot, process.env.GG_FONTS_DIR) : null,
     path.join(repoRoot, 'fonts'),
     '/usr/share/fonts/opentype/noto',
   ]
+  const found: string[] = []
   for (const dir of candidates) {
-    if (!dir || !existsSync(dir)) continue
-    if (readdirSync(dir).some(f => /noto/i.test(f) && /\.(otf|ttf|ttc)$/i.test(f))) return dir
+    if (!dir || found.includes(dir) || !existsSync(dir)) continue
+    if (readdirSync(dir).some(f => /noto/i.test(f) && /\.(otf|ttf|ttc)$/i.test(f))) found.push(dir)
   }
-  return null
+  return found
 }
 
-const fontsDir = findFontsDir()
+const fontsDirs = findFontsDirs()
+const fontsDir = fontsDirs[0] ?? null
 const hasFfmpeg = spawnSync(ffmpeg, ['-hide_banner', '-version'], { windowsHide: true }).status === 0
 
 /** Filter option value: forward slashes, escaped drive-letter colon, quoted. */
@@ -35,8 +38,8 @@ function filterValue(p: string): string {
 const tmp = mkdtempSync(path.join(os.tmpdir(), 'gg-subtitles-'))
 afterAll(() => rmSync(tmp, { recursive: true, force: true }))
 
-function runSubtitles(assName: string, canvas: SubtitleCanvas, extra: string[], logLevel = 'error') {
-  const filter = `subtitles=filename=${assName}:fontsdir=${filterValue(fontsDir!)}`
+function runSubtitles(assName: string, canvas: SubtitleCanvas, extra: string[], logLevel = 'error', fonts = fontsDir!) {
+  const filter = `subtitles=filename=${assName}:fontsdir=${filterValue(fonts)}`
   return spawnSync(ffmpeg, [
     '-hide_banner', '-nostdin', '-loglevel', logLevel,
     '-f', 'lavfi', '-i', `color=c=black:s=${canvas.width}x${canvas.height}:r=10:d=3`,
@@ -88,9 +91,9 @@ describe.skipIf(!hasFfmpeg || !fontsDir)('buildAss rendered by libass', () => {
     { start: 2.5, end: 3, text: 'Hello {\\b1}world\\N!' },
   ]
 
-  it('parses the document without errors (-f null)', () => {
+  it.each(fontsDirs)('parses the document without errors (-f null, fontsdir %s)', (fonts) => {
     writeFileSync(path.join(tmp, 'vertical.ass'), buildAss(cues, canvas))
-    const r = runSubtitles('vertical.ass', canvas, ['-nostats', '-f', 'null', '-'], 'info')
+    const r = runSubtitles('vertical.ass', canvas, ['-nostats', '-f', 'null', '-'], 'info', fonts)
     const log = r.stderr.toString()
     expect(r.status, log).toBe(0)
     expect(log).not.toMatch(/error|invalid/i)

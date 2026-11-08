@@ -74,7 +74,7 @@ async function submit() {
               </span>
               <span class="flex items-center gap-1.5">
                 <span class="font-medium text-highlighted">{{ layoutLabels[l] }}</span>
-                <UBadge v-if="l === 'blurred-background'" label="預設" size="xs" color="neutral" variant="soft" />
+                <UBadge v-if="l === 'blurred-background'" label="預設" size="sm" color="neutral" variant="soft" />
                 <UIcon v-if="layout === l" name="i-lucide-circle-check" class="ml-auto size-4 text-primary" />
               </span>
               <span class="text-xs leading-relaxed text-muted">{{ layoutDescriptions[l] }}</span>

@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -162,6 +163,27 @@ describe('exportClip (real ffmpeg)', () => {
     const raw = rawProbe(output)
     expect(raw.streams.find(s => s.codec_type === 'video')).toMatchObject({ width: 720, height: 1280 })
     expect(raw.streams.filter(s => s.codec_type === 'audio')).toHaveLength(1)
+  })
+
+  it('exports a rotated phone video upright (ffmpeg autorotates before the graph)', async () => {
+    const dir = await makeTmpDir()
+    const rotated = path.join(dir, 'rotated.mp4')
+    const r = spawnSync('ffmpeg', ['-v', 'error', '-y', '-display_rotation', '90', '-i', fx.noAudioMp4, '-c', 'copy', rotated], { encoding: 'utf8' })
+    expect(r.status, r.stderr).toBe(0)
+    const info = await probeMedia(tools, rotated)
+    const output = path.join(dir, 'out.mp4')
+    await exportClip(tools, baseJob({ input: rotated, media: info, start: 0, end: 1, layout: 'original', output }))
+    const v = rawProbe(output).streams.find(s => s.codec_type === 'video')!
+    expect(v).toMatchObject({ width: 360, height: 640 })
+    // Rotated, not squashed: compare with ffmpeg's own upright and squashed renderings of the same frame.
+    const frame = (extra: string[]) => {
+      const f = spawnSync('ffmpeg', ['-v', 'error', ...extra, '-i', rotated, '-frames:v', '1', '-vf', 'scale=360:640', '-f', 'rawvideo', '-pix_fmt', 'gray', '-'])
+      expect(f.status, f.stderr.toString()).toBe(0)
+      return f.stdout as Buffer
+    }
+    const out = grayFrame(output, 0)
+    expect(countDiff(out, frame([]), 360, 0, 640)).toBeLessThan(360 * 640 * 0.02)
+    expect(countDiff(out, frame(['-noautorotate']), 360, 0, 640)).toBeGreaterThan(360 * 640 * 0.1)
   })
 
   it.skipIf(!CJK_FONT)('burns ASS subtitles from a folder with tricky characters, using fontsdir', async () => {
