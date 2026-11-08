@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { buildAss, buildSrt, escapeAssText, formatAssTime, formatSrtTime, subtitleStyleFor } from './ass'
+import { buildAss, buildSrt, escapeAssText, fittingFontSize, FONT_SIZE_PER_EM, formatAssTime, formatSrtTime, subtitleStyleFor } from './ass'
+import { MAX_SEGMENT_UNITS } from './segments'
+import { textEm } from './text'
 import { SUBTITLE_FONT_NAME } from './types'
 import type { SubtitleCanvas } from './types'
 
@@ -11,19 +13,27 @@ function dialogues(ass: string): string[] {
 
 describe('subtitleStyleFor', () => {
   it('uses the fixed short-video style for both vertical layouts', () => {
-    const expected = { fontSize: 72, outline: 5, marginH: 60, marginV: 440, maxUnitsPerLine: 13 }
+    const expected = { fontSize: 100, outline: 6, marginH: 60, marginV: 440, maxUnitsPerLine: 13 }
     expect(subtitleStyleFor(vertical)).toEqual(expected)
     expect(subtitleStyleFor({ width: 1080, height: 1920, layout: 'center-crop' })).toEqual(expected)
   })
 
+  it('fits a whole Transcript segment in two vertical lines of real glyph width', () => {
+    const style = subtitleStyleFor(vertical)
+    expect(style.maxUnitsPerLine * 2).toBe(MAX_SEGMENT_UNITS)
+    // libass draws a CJK character Fontsize / 1.45 px wide: 13 of them fit between the margins
+    expect(13 * style.fontSize / FONT_SIZE_PER_EM).toBeLessThanOrEqual(vertical.width - 2 * style.marginH)
+    expect(14 * style.fontSize / FONT_SIZE_PER_EM).toBeGreaterThan(vertical.width - 2 * style.marginH)
+  })
+
   it('scales with the frame for the original layout', () => {
     expect(subtitleStyleFor({ width: 1920, height: 1080, layout: 'original' }))
-      .toEqual({ fontSize: 59, outline: 5, marginH: 96, marginV: 65, maxUnitsPerLine: 29 })
+      .toEqual({ fontSize: 81, outline: 6, marginH: 96, marginV: 65, maxUnitsPerLine: 30 })
     expect(subtitleStyleFor({ width: 1280, height: 720, layout: 'original' }))
-      .toEqual({ fontSize: 40, outline: 3, marginH: 64, marginV: 43, maxUnitsPerLine: 28 })
+      .toEqual({ fontSize: 54, outline: 4, marginH: 64, marginV: 43, maxUnitsPerLine: 30 })
     // Portrait source kept as is.
     expect(subtitleStyleFor({ width: 720, height: 1280, layout: 'original' }))
-      .toEqual({ fontSize: 40, outline: 3, marginH: 36, marginV: 77, maxUnitsPerLine: 16 })
+      .toEqual({ fontSize: 54, outline: 4, marginH: 36, marginV: 77, maxUnitsPerLine: 17 })
   })
 
   it('keeps a minimum outline and at least one unit per line on tiny frames', () => {
@@ -68,7 +78,7 @@ describe('buildAss', () => {
     expect(ass).toContain('ScaledBorderAndShadow: yes\n')
     expect(ass).toContain('YCbCr Matrix: TV.709\n')
     expect(ass).toContain('[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n')
-    expect(ass).toContain(`Style: Default,${SUBTITLE_FONT_NAME},72,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,5,1,2,60,60,440,1\n`)
+    expect(ass).toContain(`Style: Default,${SUBTITLE_FONT_NAME},100,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,6,1,2,60,60,440,1\n`)
     expect(ass).toContain('[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n')
     expect(dialogues(ass)).toEqual([])
     expect(ass.endsWith('\n')).toBe(true)
@@ -106,8 +116,42 @@ describe('buildAss', () => {
   })
 
   it('uses a custom font name and keeps the Style line parseable', () => {
-    expect(buildAss([], vertical, 'Noto Sans TC')).toContain('Style: Default,Noto Sans TC,72,')
-    expect(buildAss([], vertical, 'Bad,Font')).toContain('Style: Default,Bad Font,72,')
+    expect(buildAss([], vertical, 'Noto Sans TC')).toContain('Style: Default,Noto Sans TC,100,')
+    expect(buildAss([], vertical, 'Bad,Font')).toContain('Style: Default,Bad Font,100,')
+  })
+
+  it('shrinks the font of an edited segment too long for two lines, so it stays inside the frame', () => {
+    const long = '一二三四五六七八九十'.repeat(6)
+    const [dialogue] = dialogues(buildAss([{ start: 0, end: 2, text: long }], vertical))
+    // two lines of 30 characters: 100 * 13.92 / 30
+    expect(dialogue).toBe(`Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{\\fs46}${long.slice(0, 30)}\\N${long.slice(30)}`)
+    // the 200 characters the editor allows
+    const longest = dialogues(buildAss([{ start: 0, end: 2, text: '字'.repeat(200) }], vertical))[0]!
+    expect(longest).toMatch(/,\{\\fs13\}字+\\N字+$/)
+  })
+
+  it('keeps the style font size for text that fits, and user text still cannot add tags', () => {
+    expect(dialogues(buildAss([{ start: 0, end: 2, text: '一二三四五六七八九十'.repeat(2) + '一二三四五六' }], vertical))[0]).not.toContain('\\fs')
+    const ass = buildAss([{ start: 0, end: 1, text: `{\\fs200}${'字'.repeat(40)}` }], vertical)
+    expect(dialogues(ass)[0]).toMatch(/,,\{\\fs\d+\}｛＼fs200｝字/)
+  })
+
+  it('shrinks latin lines that are wider than their unit count suggests (capitals)', () => {
+    const caps = 'OH MY GOD THIS IS AMAZING WHAT A PLAY WE WON THE GAME'
+    const [dialogue] = dialogues(buildAss([{ start: 0, end: 2, text: caps }], vertical))
+    const fs = Number(/\{\\fs(\d+)\}/.exec(dialogue!)?.[1])
+    expect(fs).toBeGreaterThan(80)
+    expect(fs).toBeLessThan(100)
+    // ordinary English of segment size is left alone on a landscape frame
+    expect(dialogues(buildAss([{ start: 0, end: 2, text: 'Hello everyone, welcome back to the stream.' }], { width: 1920, height: 1080, layout: 'original' }))[0]).not.toContain('\\fs')
+  })
+
+  it('fittingFontSize scales the longest line to the space between the margins', () => {
+    expect(fittingFontSize([], vertical)).toBeNull()
+    expect(fittingFontSize(['一二三四五六七八九十一二三'], vertical)).toBeNull()
+    expect(fittingFontSize(['一二三四五六七八九十一二三四五六七八九十'], vertical)).toBe(69)
+    const fs = fittingFontSize(['WWWWWWWWWWWWWWWWWW'], vertical)!
+    expect(textEm('WWWWWWWWWWWWWWWWWW') * fs / FONT_SIZE_PER_EM).toBeLessThanOrEqual(960)
   })
 
   it('skips cues that are empty or have no duration', () => {

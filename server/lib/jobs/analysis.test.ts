@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
@@ -6,6 +7,7 @@ import { fixtures, type Fixtures } from '../../../tests/fixtures'
 import type { AnalysisState, Language } from '../../../shared/types/domain'
 import type { NewVideo } from '../db'
 import { probeMedia } from '../media'
+import { CAN_FAKE_FFMPEG, fakeFfmpegCalls, writeFailingNvencFfmpeg } from '../media/test-utils'
 import { AnalysisQueue, analysisFiles, checkAudioTrack } from './analysis'
 import { CANCELLED_MESSAGE, MISSING_SOURCE_MESSAGE } from './errors'
 import { createJobTestEnv, fakeTranscriberCommand, type JobTestEnv, processAlive, waitFor } from './test-helpers/setup'
@@ -155,6 +157,37 @@ describe('AnalysisQueue: happy path', () => {
     const aDone = writes.findIndex(w => w.id === a.id && w.patch.status === 'done')
     const bStart = writes.findIndex(w => w.id === b.id && w.patch.status === 'running')
     expect(aDone).toBeLessThan(bStart)
+  })
+})
+
+describe('AnalysisQueue: NVENC busy at runtime', () => {
+  it.skipIf(!CAN_FAKE_FFMPEG)('transcodes the preview with libx264 instead, logs it, and finishes (injected failing NVENC)', async () => {
+    // a codec browsers cannot play, so the preview step transcodes
+    const source = path.join(env.dataDir, 'mpeg4.mkv')
+    const made = spawnSync(env.tools.ffmpegPath, ['-v', 'error', '-y',
+      '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30:duration=1',
+      '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1',
+      '-c:v', 'mpeg4', '-c:a', 'aac', '-shortest', source], { encoding: 'utf8' })
+    expect(made.status, made.stderr).toBe(0)
+    const fake = await writeFailingNvencFfmpeg(await fsp.mkdtemp(path.join(env.dataDir, 'fake-')))
+    const queue = new AnalysisQueue({
+      config: { ...env.config, videoEncoderOverride: 'h264_nvenc' },
+      repos: env.repos,
+      tools: { ...env.tools, ffmpegPath: fake.ffmpegPath },
+      transcriberCommand: fakeTranscriberCommand('ok'),
+      log: message => logs.push(message),
+    })
+    queues.push(queue)
+    const video = addVideo(source)
+    await runToEnd(queue)
+
+    const done = env.repos.videos.get(video.id)!
+    expect(done.analysis).toMatchObject({ status: 'done', error: null })
+    expect(done.previewPath).toBe(analysisFiles(env, video.id).preview)
+    expect((await probeMedia(env.tools, done.previewPath!)).videoCodec).toBe('h264')
+    // extract-audio (no video encoder), then the preview: NVENC, then libx264
+    expect((await fakeFfmpegCalls(fake.calls)).slice(-2)).toEqual(['h264_nvenc', 'libx264'])
+    expect(logs).toContainEqual(expect.stringMatching(new RegExp(`^\\[analysis ${video.id}\\] NVENC 硬體編碼失敗，改用 CPU（libx264）重新編碼：`)))
   })
 })
 

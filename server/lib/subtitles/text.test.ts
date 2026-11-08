@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { cleanEnText, cleanZhText, dropTightSpaces, hasContent, isWide, textUnits, toTaiwanTraditional } from './text'
+import { cleanEnText, cleanZhText, dropTightSpaces, hasContent, isWide, textEm, textUnits, toTaiwanTraditional } from './text'
 
 describe('toTaiwanTraditional', () => {
   it('converts Simplified Chinese to Taiwan Traditional characters', () => {
@@ -19,6 +19,16 @@ describe('toTaiwanTraditional', () => {
     expect(toTaiwanTraditional('這個遊戲很好玩')).toBe('這個遊戲很好玩')
     expect(toTaiwanTraditional('Boss 好難打 GG')).toBe('Boss 好難打 GG')
     expect(toTaiwanTraditional('')).toBe('')
+  })
+
+  it('keeps the everyday 台 instead of OpenCC\'s formal 臺', () => {
+    expect(toTaiwanTraditional('台灣')).toBe('台灣')
+    expect(toTaiwanTraditional('台湾的台北')).toBe('台灣的台北')
+    expect(toTaiwanTraditional('后台和舞台上的台词，电台和平台')).toBe('後台和舞台上的台詞，電台和平台')
+    expect(toTaiwanTraditional('臺灣')).toBe('台灣')
+    // other characters that simplify to 台 keep their own form
+    expect(toTaiwanTraditional('台风')).toBe('颱風')
+    expect(toTaiwanTraditional('柜台')).toBe('櫃檯')
   })
 
   it('is idempotent', () => {
@@ -55,6 +65,30 @@ describe('textUnits', () => {
     expect(isWide('中')).toBe(true)
     expect(isWide('a')).toBe(false)
     expect(isWide(undefined)).toBe(false)
+  })
+})
+
+describe('textEm', () => {
+  it('measures CJK as 1 em and ASCII by the subtitle font\'s advance widths', () => {
+    expect(textEm('')).toBe(0)
+    expect(textEm('你好')).toBe(2)
+    expect(textEm('一二三四五六七八九十一二三')).toBe(13)
+    expect(textEm(' ')).toBe(0.227)
+    expect(textEm('W')).toBe(0.915)
+    expect(textEm('i')).toBe(0.304)
+    expect(textEm('0123456789')).toBeCloseTo(5.9, 6)
+    expect(textEm('Hello world')).toBeCloseTo(0.757 + 0.581 + 0.315 * 2 + 0.626 + 0.227 + 0.863 + 0.626 + 0.436 + 0.315 + 0.644, 6)
+  })
+
+  it('counts other characters (curly quotes, …, accents) as full width, like the CJK font draws most of them', () => {
+    expect(textEm('“…”')).toBe(3)
+    expect(textEm('é')).toBe(1)
+    expect(textEm('𠀀')).toBe(1)
+  })
+
+  it('is wider than textUnits for latin capitals, narrower for spaces', () => {
+    expect(textEm('WWWW')).toBeGreaterThan(textUnits('WWWW'))
+    expect(textEm('    ')).toBeLessThan(textUnits('    '))
   })
 })
 

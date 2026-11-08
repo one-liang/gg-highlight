@@ -1,7 +1,7 @@
 import path from 'node:path'
 import { defineEventHandler, getRequestHeader } from 'h3'
 import type { MediaInfo, UploadResult } from '../../shared/types/domain'
-import { badRequest, httpError, unprocessable } from '../lib/api'
+import { badRequest, httpError, unreadableVideo } from '../lib/api'
 import { uploadsDir } from '../lib/config'
 import { cleanFileName, deleteInsideDataDir, isVideoFile, saveUpload, VIDEO_EXTENSIONS } from '../lib/library'
 import { probeMedia } from '../lib/media'
@@ -44,7 +44,7 @@ export default defineEventHandler(async (event): Promise<UploadResult> => {
   catch (err) {
     const sidecar = path.join(uploadsDir(config), `${saved.uploadId}.json`)
     await deleteInsideDataDir(config, [saved.filePath, sidecar]).catch(() => {})
-    throw unprocessable(`無法讀取這個影片檔：${(err as Error).message.split('\n')[0]}`)
+    throw unreadableVideo(err)
   }
   return { uploadId: saved.uploadId, fileName: saved.fileName, media }
 })

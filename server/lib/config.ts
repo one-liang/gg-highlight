@@ -53,6 +53,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
   }
 }
 
+/** Where the server listens unless HOST / PORT say otherwise: this computer only (design.md). */
+export const DEFAULT_HOST = '127.0.0.1'
+export const DEFAULT_PORT = 3939
+
+/**
+ * Fills in HOST / PORT when neither they nor NITRO_HOST / NITRO_PORT are set, so the built server
+ * never falls back to Nitro's own defaults (all interfaces, port 3000), e.g. when started with
+ * `node .output/server/index.mjs` as the build output suggests. Explicit values always win.
+ */
+export function applyListenDefaults(env: NodeJS.ProcessEnv = process.env): void {
+  if (!env.NITRO_HOST && !env.HOST) env.HOST = DEFAULT_HOST
+  if (!env.NITRO_PORT && !env.PORT) env.PORT = String(DEFAULT_PORT)
+}
+
 let cached: AppConfig | null = null
 
 export function getConfig(): AppConfig {

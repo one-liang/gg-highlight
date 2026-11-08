@@ -8,6 +8,11 @@ import { badRequest, unprocessable } from './errors'
 export const MIN_HIGHLIGHT_SECONDS = 0.5
 // Times from the UI come from a <video> element and text inputs; allow a millisecond of slack.
 const EPS = 0.001
+/**
+ * The UI shows the video length rounded (to 0.1 s, or to whole seconds), up to 0.5 s above the real
+ * length; an end up to that far past the video is accepted and clamped to the length.
+ */
+export const END_SLACK_SECONDS = 0.5
 
 const round3 = (x: number) => Math.round(x * 1000) / 1000
 
@@ -17,11 +22,14 @@ export function clock(sec: number): string {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
 }
 
-/** 0 <= start < end <= duration and at least 0.5 s long; returns the range rounded to ms. Throws 422. */
+/**
+ * 0 <= start < end <= duration and at least 0.5 s long; returns the range rounded to ms, with an end
+ * up to END_SLACK_SECONDS past the video clamped to its length. Throws 422.
+ */
 export function checkHighlightRange(start: number, end: number, durationSec: number): { start: number, end: number } {
   if (start < 0) throw unprocessable('起點不能小於 0')
   if (end <= start) throw unprocessable('終點必須晚於起點')
-  if (end > durationSec + EPS) throw unprocessable(`終點不能超過影片長度（${clock(durationSec)}）`)
+  if (end > durationSec + END_SLACK_SECONDS) throw unprocessable(`終點不能超過影片長度（${clock(durationSec)}）`)
   if (start >= durationSec) throw unprocessable(`起點必須在影片長度（${clock(durationSec)}）之內`)
   const range = { start: round3(start), end: round3(Math.min(end, durationSec)) }
   if (range.end - range.start < MIN_HIGHLIGHT_SECONDS - EPS) throw unprocessable(`精華片段至少要 ${MIN_HIGHLIGHT_SECONDS} 秒`)

@@ -6,6 +6,7 @@ import { fixtures, type Fixtures } from '../../../tests/fixtures'
 import type { Layout, MediaInfo } from '../../../shared/types/domain'
 import type { ClipRecord, VideoRecord } from '../db'
 import { probeMedia } from '../media'
+import { CAN_FAKE_FFMPEG, fakeFfmpegCalls, writeFailingNvencFfmpeg } from '../media/test-utils'
 import { CANCELLED_MESSAGE, MISSING_SOURCE_MESSAGE } from './errors'
 import { clipFiles, ExportQueue } from './export'
 import { createJobTestEnv, type JobTestEnv, waitFor } from './test-helpers/setup'
@@ -159,6 +160,31 @@ describe('ExportQueue: layouts', () => {
     await runToEnd(makeQueue())
     expect(order).toEqual([a.id, b.id])
     expect(maxRunning).toBe(1)
+  })
+})
+
+describe('ExportQueue: NVENC busy at runtime', () => {
+  it.skipIf(!CAN_FAKE_FFMPEG)('redoes the export with libx264, logs it, and finishes the clip (injected failing NVENC)', async () => {
+    const fake = await writeFailingNvencFfmpeg(await fsp.mkdtemp(path.join(env.dataDir, 'fake-')))
+    const logs: string[] = []
+    const queue = new ExportQueue({
+      config: { ...env.config, videoEncoderOverride: 'h264_nvenc' },
+      repos: env.repos,
+      tools: { ...env.tools, ffmpegPath: fake.ffmpegPath },
+      transcriberCommand: [],
+      log: message => logs.push(message),
+    })
+    queues.push(queue)
+    const video = addAnalysedVideo()
+    const clip = addClip(video, { layout: 'original', burnSubtitles: true })
+    await runToEnd(queue)
+
+    expect(env.repos.clips.get(clip.id)).toMatchObject({ status: 'done', error: null, fileName: `${clip.id}.mp4` })
+    expect(await fakeFfmpegCalls(fake.calls)).toEqual(['h264_nvenc', 'libx264'])
+    expect(logs).toEqual([expect.stringMatching(new RegExp(`^\\[export ${clip.id}\\] NVENC 硬體編碼失敗，改用 CPU（libx264）重新編碼：`))])
+    const files = clipFiles(env, clip)
+    expect((await probeMedia(env.tools, files.mp4)).videoCodec).toBe('h264')
+    expect(fs.readdirSync(files.dir).sort()).toEqual([`${clip.id}.ass`, `${clip.id}.mp4`, `${clip.id}.srt`])
   })
 })
 

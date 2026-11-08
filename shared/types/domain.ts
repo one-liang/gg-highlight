@@ -142,6 +142,8 @@ export interface Settings {
 export interface SystemInfo {
   version: string
   videoEncoder: 'h264_nvenc' | 'libx264'
+  /** True when GG_VIDEO_ENCODER chose the encoder instead of detection. */
+  videoEncoderForced: boolean
   dataDir: string
   fontsReady: boolean
 }

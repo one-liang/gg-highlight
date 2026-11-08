@@ -7,8 +7,8 @@
 //   ass.ts       subtitle style per canvas, ASS and SRT documents
 export { SUBTITLE_FONT_NAME } from './types'
 export type { Cue, SegmentDraft, SubtitleCanvas, SubtitleStyle } from './types'
-export { textUnits, toTaiwanTraditional } from './text'
+export { textEm, textUnits, toTaiwanTraditional } from './text'
 export { buildTranscriptSegments, HARD_PAUSE_SECONDS, MAX_SEGMENT_SECONDS, MAX_SEGMENT_UNITS, PAUSE_SECONDS } from './segments'
 export { cuesForRange, MIN_CUE_SECONDS } from './cues'
 export { wrapLines } from './wrap'
-export { buildAss, buildSrt, escapeAssText, formatAssTime, formatSrtTime, subtitleStyleFor } from './ass'
+export { buildAss, buildSrt, escapeAssText, fittingFontSize, FONT_SIZE_PER_EM, formatAssTime, formatSrtTime, subtitleStyleFor } from './ass'

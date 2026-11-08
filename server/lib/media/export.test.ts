@@ -6,7 +6,7 @@ import { beforeAll, describe, expect, it } from 'vitest'
 import type { Layout, MediaInfo } from '../../../shared/types/domain'
 import { buildExportArgs, buildFilterGraph, exportClip, fontsReady, formatSeconds, outputSizeFor } from './export'
 import { probeMedia } from './probe'
-import { CJK_FONT, countDiff, fx, grayFrame, installFont, makeTmpDir, minimalAss, rawProbe, tools } from './test-utils'
+import { CAN_FAKE_FFMPEG, CJK_FONT, countDiff, fakeFfmpegCalls, fx, grayFrame, installFont, makeTmpDir, minimalAss, rawProbe, tools, writeFailingNvencFfmpeg } from './test-utils'
 import type { ExportJob } from './types'
 
 function media(width: number, height: number): MediaInfo {
@@ -237,10 +237,43 @@ describe('exportClip (real ffmpeg)', () => {
     expect(await fs.readdir(dir)).toEqual([])
   })
 
-  it('removes the temp file when the encoder fails (NVENC without a GPU)', async () => {
+  it('removes the temp file when ffmpeg fails', async () => {
     const dir = await makeTmpDir()
-    const err = await exportClip(tools, baseJob({ encoder: 'h264_nvenc', output: path.join(dir, 'nvenc.mp4') })).catch(e => e) as Error
+    const broken = path.join(await makeTmpDir(), 'broken.mkv')
+    await fs.writeFile(broken, Buffer.alloc(4096, 7))
+    const err = await exportClip(tools, baseJob({ input: broken, output: path.join(dir, 'broken.mp4') })).catch(e => e) as Error
     expect(err.message).toMatch(/ffmpeg 執行失敗/)
+    expect(await fs.readdir(dir)).toEqual([])
+  })
+
+  it.skipIf(!CAN_FAKE_FFMPEG)('redoes the export with libx264 when NVENC fails at runtime (injected busy NVENC)', async () => {
+    const fake = await writeFailingNvencFfmpeg(await makeTmpDir())
+    const dir = await makeTmpDir()
+    const output = path.join(dir, 'clip.mp4')
+    const fallbacks: unknown[] = []
+    const seen: number[] = []
+    await exportClip({ ...tools, ffmpegPath: fake.ffmpegPath }, baseJob({ encoder: 'h264_nvenc', output }), {
+      onEncoderFallback: err => fallbacks.push(err),
+      onProgress: v => seen.push(v),
+    })
+    expect(await fakeFfmpegCalls(fake.calls)).toEqual(['h264_nvenc', 'libx264'])
+    expect(fallbacks).toHaveLength(1)
+    expect((fallbacks[0] as Error).message).toMatch(/OpenEncodeSessionEx failed/)
+    expect(rawProbe(output).streams.find(s => s.codec_type === 'video')).toMatchObject({ codec_name: 'h264', width: 1080, height: 1920 })
+    // the failed attempt's temp file is gone
+    expect(await fs.readdir(dir)).toEqual(['clip.mp4'])
+    expect(seen.at(-1)).toBe(1)
+  })
+
+  it.skipIf(!CAN_FAKE_FFMPEG)('reports the libx264 error when the retry fails too, leaving nothing behind', async () => {
+    const fake = await writeFailingNvencFfmpeg(await makeTmpDir())
+    const dir = await makeTmpDir()
+    const broken = path.join(await makeTmpDir(), 'broken.mkv')
+    await fs.writeFile(broken, Buffer.alloc(4096, 7))
+    const err = await exportClip({ ...tools, ffmpegPath: fake.ffmpegPath }, baseJob({ input: broken, encoder: 'h264_nvenc', output: path.join(dir, 'x.mp4') })).catch(e => e) as Error
+    expect(await fakeFfmpegCalls(fake.calls)).toEqual(['h264_nvenc', 'libx264'])
+    expect(err.message).toMatch(/ffmpeg|fake-ffmpeg/)
+    expect(err.message).not.toMatch(/OpenEncodeSessionEx/)
     expect(await fs.readdir(dir)).toEqual([])
   })
 })

@@ -109,14 +109,20 @@ export function parseProbeOutput(data: ProbeOutput): MediaInfo {
   }
 }
 
-async function ffprobeJson(tools: MediaTools, args: string[]): Promise<ProbeOutput> {
+/** Last stderr line without ffprobe's "<input path>: " prefix (the path is noise, and for uploads an internal one). */
+function probeErrorDetail(err: unknown, inputPath: string): string {
+  const detail = err instanceof MediaToolError ? err.stderr.split(/\r?\n/).filter(Boolean).pop() ?? '' : (err as Error).message
+  const prefix = `${inputPath}: `
+  return (detail.startsWith(prefix) ? detail.slice(prefix.length) : detail).trim()
+}
+
+async function ffprobeJson(tools: MediaTools, inputPath: string, args: string[]): Promise<ProbeOutput> {
   let stdout: string
   try {
-    stdout = await runTool(tools.ffprobePath, ['-v', 'error', '-print_format', 'json', ...args], { collectStdout: true })
+    stdout = await runTool(tools.ffprobePath, ['-v', 'error', '-print_format', 'json', ...args, '-i', inputPath], { collectStdout: true })
   }
   catch (err) {
-    const detail = err instanceof MediaToolError ? err.stderr.split(/\r?\n/).filter(Boolean).pop() : (err as Error).message
-    throw new Error(`無法讀取影片：${detail || '未知錯誤'}`)
+    throw new Error(`無法讀取影片：${probeErrorDetail(err, inputPath) || '未知錯誤'}`)
   }
   try {
     return JSON.parse(stdout) as ProbeOutput
@@ -127,12 +133,12 @@ async function ffprobeJson(tools: MediaTools, args: string[]): Promise<ProbeOutp
 }
 
 export async function probeMedia(tools: MediaTools, filePath: string): Promise<MediaInfo> {
-  const data = await ffprobeJson(tools, ['-show_format', '-show_streams', '-i', path.resolve(filePath)])
+  const data = await ffprobeJson(tools, path.resolve(filePath), ['-show_format', '-show_streams'])
   return parseProbeOutput(data)
 }
 
 /** Number of audio streams, without requiring a video stream. */
 export async function countAudioTracks(tools: MediaTools, filePath: string): Promise<number> {
-  const data = await ffprobeJson(tools, ['-select_streams', 'a', '-show_entries', 'stream=index', '-i', path.resolve(filePath)])
+  const data = await ffprobeJson(tools, path.resolve(filePath), ['-select_streams', 'a', '-show_entries', 'stream=index'])
   return data.streams?.length ?? 0
 }

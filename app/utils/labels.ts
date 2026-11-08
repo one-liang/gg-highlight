@@ -148,6 +148,15 @@ export function analysisStepState(step: AnalysisStep, current: AnalysisStep | nu
   return 'pending'
 }
 
+/** Same text the server stores as the analysis error when the source file is gone. */
+export const MISSING_FILE_LABEL = '找不到原始影片檔'
+
+/** Library row: the separate missing-file line, unless the failed analysis already says exactly that. */
+export function showsMissingFileLine(video: Pick<SourceVideo, 'fileMissing' | 'analysis'>): boolean {
+  if (!video.fileMissing) return false
+  return !(video.analysis.status === 'failed' && video.analysis.error?.startsWith(MISSING_FILE_LABEL))
+}
+
 export function isAnalysisActive(video: Pick<SourceVideo, 'analysis'>): boolean {
   return video.analysis.status === 'queued' || video.analysis.status === 'running'
 }

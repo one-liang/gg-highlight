@@ -2,7 +2,7 @@
 import path from 'node:path'
 import { clipsDir } from '../config'
 import type { ClipRecord } from '../db'
-import { detectVideoEncoder, exportClip, outputSizeFor, probeMedia } from '../media'
+import { detectVideoEncoder, encoderFallbackMessage, exportClip, outputSizeFor, probeMedia } from '../media'
 import { buildAss, buildSrt, cuesForRange } from '../subtitles'
 import { CANCELLED_MESSAGE, MISSING_SOURCE_MESSAGE, readableError } from './errors'
 import { isFile, removeLeftovers, removeQuietly, writeTextAtomic } from './files'
@@ -64,7 +64,11 @@ export async function runExport(deps: JobDeps, clipId: string, signal: AbortSign
       fontsDir: config.fontsDir,
       output: files.mp4,
       encoder,
-    }, { signal, onProgress: value => progress.report(value) })
+    }, {
+      signal,
+      onProgress: value => progress.report(value),
+      onEncoderFallback: err => deps.log(`[export ${clipId}] ${encoderFallbackMessage(err)}`),
+    })
     throwIfAborted(signal)
 
     repos.clips.update(clipId, {

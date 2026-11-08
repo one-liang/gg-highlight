@@ -1,7 +1,7 @@
 // Browser preview: play the original when possible, else remux to mp4, else transcode to ≤720p h264.
 import path from 'node:path'
 import type { MediaInfo } from '../../../shared/types/domain'
-import { detectVideoEncoder } from './encoder'
+import { detectVideoEncoder, type EncoderFallbackOptions, withEncoderFallback } from './encoder'
 import { writeAtomically } from './files'
 import { runFfmpeg } from './process'
 import type { MediaTools, RunOptions, VideoEncoder } from './types'
@@ -62,20 +62,23 @@ export function previewArgs(filePath: string, media: MediaInfo, plan: Exclude<Pr
   return args
 }
 
+/** Makes the preview mp4 when needed; a transcode with h264_nvenc that fails is redone once with libx264. */
 export async function preparePreview(
   tools: MediaTools,
   input: { filePath: string, media: MediaInfo },
   outPath: string,
-  opts: RunOptions & { encoder?: VideoEncoder } = {},
+  opts: RunOptions & { encoder?: VideoEncoder, onEncoderFallback?: EncoderFallbackOptions['onFallback'] } = {},
 ): Promise<{ previewPath: string | null }> {
   const plan = previewPlan(input.media)
   if (plan === 'original') return { previewPath: null }
-  const { encoder: requested, ...runOpts } = opts
+  const { encoder: requested, onEncoderFallback, ...runOpts } = opts
   const encoder = plan === 'transcode' ? requested ?? await detectVideoEncoder(tools) : 'libx264'
-  const args = previewArgs(path.resolve(input.filePath), input.media, plan, encoder)
-  await writeAtomically(path.resolve(outPath), tmp => runFfmpeg(tools, [...args, tmp], {
-    ...runOpts,
-    durationSec: input.media.durationSec,
-  }))
+  await withEncoderFallback(encoder, (current) => {
+    const args = previewArgs(path.resolve(input.filePath), input.media, plan, current)
+    return writeAtomically(path.resolve(outPath), tmp => runFfmpeg(tools, [...args, tmp], {
+      ...runOpts,
+      durationSec: input.media.durationSec,
+    }))
+  }, { signal: runOpts.signal, onFallback: onEncoderFallback })
   return { previewPath: outPath }
 }

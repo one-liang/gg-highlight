@@ -214,7 +214,10 @@ async function copyDataDir() {
                 :icon="system.data.value.videoEncoder === 'h264_nvenc' ? 'i-lucide-zap' : 'i-lucide-cpu'"
                 variant="subtle"
               />
-              <p v-if="system.data.value.videoEncoder === 'libx264'" class="text-xs text-muted">
+              <p v-if="system.data.value.videoEncoderForced" class="text-xs text-muted">
+                由環境變數 <code class="font-mono">GG_VIDEO_ENCODER</code> 指定。
+              </p>
+              <p v-else-if="system.data.value.videoEncoder === 'libx264'" class="text-xs text-muted">
                 沒有偵測到可用的 NVIDIA 硬體編碼器，輸出剪輯會用 CPU 編碼，速度比較慢。
               </p>
             </dd>
@@ -222,7 +225,7 @@ async function copyDataDir() {
 
           <div class="grid gap-1 py-3 sm:grid-cols-[10rem_1fr] sm:gap-4">
             <dt class="text-muted">
-              資料夾
+              資料存放位置
             </dt>
             <dd class="flex items-start gap-2">
               <code class="min-w-0 flex-1 break-all font-mono text-xs leading-6 text-highlighted">{{ system.data.value.dataDir }}</code>

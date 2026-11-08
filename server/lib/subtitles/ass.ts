@@ -1,28 +1,54 @@
 // Subtitle look per canvas, and the ASS / SRT documents for a Clip.
 import type { Cue, SubtitleCanvas, SubtitleStyle } from './types'
+import { textEm } from './text'
 import { SUBTITLE_FONT_NAME } from './types'
 import { wrapLines } from './wrap'
 
-const VERTICAL_STYLE = { fontSize: 72, outline: 5, marginH: 60, marginV: 440 }
+/**
+ * libass takes the ASS Fontsize as the font's ascender + descender, which is about 1.45 em for
+ * Noto Sans CJK (1160 + 288 per 1000): Fontsize 100 draws CJK characters about 69 px wide.
+ */
+export const FONT_SIZE_PER_EM = 1.45
+
+// 1080x1920: 13 CJK characters (about 69 px each) per line; marginV 440 puts the text just below
+// the centred 16:9 band of blurred-background.
+const VERTICAL_STYLE = { fontSize: 100, outline: 6, marginH: 60, marginV: 440 }
 
 /** Short-video subtitle look per canvas: big white text, black outline, bottom-centre-ish. */
 export function subtitleStyleFor(canvas: SubtitleCanvas): SubtitleStyle {
   const { width, height, layout } = canvas
   if (layout === 'blurred-background' || layout === 'center-crop') {
-    // 1080x1920: marginV 440 puts the text just below the centred 16:9 band of blurred-background.
     const { fontSize, outline, marginH, marginV } = VERTICAL_STYLE
     return { fontSize, outline, marginH, marginV, maxUnitsPerLine: unitsPerLine(width, marginH, fontSize) }
   }
   const base = Math.min(width, height)
-  const fontSize = Math.max(1, Math.round(base * 0.055))
-  const outline = Math.max(2, Math.round(fontSize / 12))
+  const fontSize = Math.max(1, Math.round(base * 0.075))
+  const outline = Math.max(2, Math.round(fontSize / 14))
   const marginV = Math.round(height * 0.06)
   const marginH = Math.round(width * 0.05)
   return { fontSize, outline, marginH, marginV, maxUnitsPerLine: unitsPerLine(width, marginH, fontSize) }
 }
 
+/** Pixel width of one em (one CJK character) at an ASS Fontsize. */
+function emPixels(fontSize: number): number {
+  return fontSize / FONT_SIZE_PER_EM
+}
+
 function unitsPerLine(width: number, marginH: number, fontSize: number): number {
-  return Math.max(1, Math.floor((width - 2 * marginH) / fontSize))
+  return Math.max(1, Math.floor((width - 2 * marginH) / emPixels(fontSize)))
+}
+
+/**
+ * Smaller Fontsize for lines that would be wider than the space between the margins, or null when
+ * they fit. Transcript segments always fit; a long edited segment (up to 200 characters) or wide
+ * latin text would otherwise run off both edges, since WrapStyle 2 never re-wraps.
+ */
+export function fittingFontSize(lines: string[], canvas: SubtitleCanvas, style: SubtitleStyle = subtitleStyleFor(canvas)): number | null {
+  if (!lines.length) return null
+  const availableEm = (canvas.width - 2 * style.marginH) / emPixels(style.fontSize)
+  const longest = Math.max(...lines.map(textEm))
+  if (longest <= availableEm) return null
+  return Math.max(1, Math.floor(style.fontSize * availableEm / longest))
 }
 
 /** Makes user text inert for ASS: no override blocks, no \N / \h escapes. */
@@ -78,8 +104,11 @@ export function buildAss(cues: Cue[], canvas: SubtitleCanvas, fontName: string =
   for (const cue of cues) {
     // Nothing to show once rounded to centiseconds.
     if (Math.round(cue.end * 100) <= Math.round(Math.max(0, cue.start) * 100)) continue
-    const text = wrapLines(escapeAssText(cue.text ?? ''), style.maxUnitsPerLine, 2).join('\\N')
-    if (!text) continue
+    const wrapped = wrapLines(escapeAssText(cue.text ?? ''), style.maxUnitsPerLine, 2)
+    if (!wrapped.length) continue
+    // The override comes after escapeAssText, so user text still cannot add tags of its own.
+    const fontSize = fittingFontSize(wrapped, canvas, style)
+    const text = (fontSize ? `{\\fs${fontSize}}` : '') + wrapped.join('\\N')
     lines.push(`Dialogue: 0,${formatAssTime(cue.start)},${formatAssTime(cue.end)},Default,,0,0,0,,${text}`)
   }
   return `${lines.join('\n')}\n`

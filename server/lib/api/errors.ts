@@ -31,3 +31,10 @@ export function asHttpError(err: unknown, statusCode: number, prefix: string): H
   const firstLines = raw.split(/\r?\n/).filter(line => line.trim() !== '' && !/^\s+at\s/.test(line)).slice(0, 4).join('\n').trim()
   return httpError(statusCode, firstLines ? `${prefix}：${firstLines}` : prefix)
 }
+
+/** 422 for a file ffprobe could not read: 「無法讀取這個影片檔：<reason>」 (without probeMedia's own prefix). */
+export function unreadableVideo(err: unknown): H3Error {
+  const first = (err instanceof Error ? err.message : String(err ?? '')).split(/\r?\n/)[0]!.trim()
+  const reason = first.replace(/^無法讀取影片：/, '').trim()
+  return unprocessable(reason ? `無法讀取這個影片檔：${reason}` : '無法讀取這個影片檔')
+}

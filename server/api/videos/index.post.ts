@@ -4,6 +4,7 @@ import { defineEventHandler } from 'h3'
 import type { MediaInfo, SourceVideo } from '../../../shared/types/domain'
 import {
   addVideoSchema, badRequest, conflict, forbidden, notFound, parseWith, readJsonBody, titleFromFileName, unprocessable,
+  unreadableVideo,
 } from '../../lib/api'
 import { checkAudioTrack } from '../../lib/jobs'
 import { isInWatchFolders, resolveUpload, toSourceVideo } from '../../lib/library'
@@ -46,7 +47,7 @@ export default defineEventHandler(async (event): Promise<SourceVideo> => {
     media = await probeMedia(tools, filePath)
   }
   catch (err) {
-    throw unprocessable(`無法讀取這個影片檔：${(err as Error).message.split('\n')[0]}`)
+    throw unreadableVideo(err)
   }
   try {
     checkAudioTrack(media, body.audioTrack)

@@ -13,6 +13,8 @@ import {
   languageLabels,
   layoutLabels,
   LAYOUTS,
+  MISSING_FILE_LABEL,
+  showsMissingFileLine,
   sourceKindLabels,
   videoEncoderLabels,
 } from './labels'
@@ -82,5 +84,13 @@ describe('analysis steps', () => {
     expect(isAnalysisActive(v('failed'))).toBe(false)
     expect(isClipActive({ status: 'running' })).toBe(true)
     expect(isClipActive({ status: 'done' })).toBe(false)
+  })
+
+  it('shows the missing-file line once, not again under the same analysis error', () => {
+    const v = (fileMissing: boolean, partial: Partial<AnalysisState>) => ({ fileMissing, analysis: analysis(partial) })
+    expect(showsMissingFileLine(v(false, { status: 'done' }))).toBe(false)
+    expect(showsMissingFileLine(v(true, { status: 'done' }))).toBe(true)
+    expect(showsMissingFileLine(v(true, { status: 'failed', error: MISSING_FILE_LABEL }))).toBe(false)
+    expect(showsMissingFileLine(v(true, { status: 'failed', error: '語音辨識失敗' }))).toBe(true)
   })
 })

@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
-import { buildAss, buildTranscriptSegments, cuesForRange, subtitleStyleFor } from './index'
+import { buildAss, buildTranscriptSegments, cuesForRange, FONT_SIZE_PER_EM, subtitleStyleFor } from './index'
 import type { SubtitleCanvas } from './index'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
@@ -38,19 +38,19 @@ function filterValue(p: string): string {
 const tmp = mkdtempSync(path.join(os.tmpdir(), 'gg-subtitles-'))
 afterAll(() => rmSync(tmp, { recursive: true, force: true }))
 
-function runSubtitles(assName: string, canvas: SubtitleCanvas, extra: string[], logLevel = 'error', fonts = fontsDir!) {
+function runSubtitles(assName: string, canvas: SubtitleCanvas, extra: string[], logLevel = 'error', fonts = fontsDir!, background = 'black') {
   const filter = `subtitles=filename=${assName}:fontsdir=${filterValue(fonts)}`
   return spawnSync(ffmpeg, [
     '-hide_banner', '-nostdin', '-loglevel', logLevel,
-    '-f', 'lavfi', '-i', `color=c=black:s=${canvas.width}x${canvas.height}:r=10:d=3`,
+    '-f', 'lavfi', '-i', `color=c=${background}:s=${canvas.width}x${canvas.height}:r=10:d=3`,
     '-vf', filter,
     ...extra,
   ], { cwd: tmp, windowsHide: true, maxBuffer: 64 * 1024 * 1024 })
 }
 
 /** Grabs the frame at `at` seconds as 8-bit gray pixels. */
-function grabGray(assName: string, canvas: SubtitleCanvas, at: number): Buffer {
-  const r = runSubtitles(assName, canvas, ['-ss', String(at), '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'gray', '-'])
+function grabGray(assName: string, canvas: SubtitleCanvas, at: number, background = 'black'): Buffer {
+  const r = runSubtitles(assName, canvas, ['-ss', String(at), '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'gray', '-'], 'error', fontsDir!, background)
   expect(r.status, r.stderr?.toString()).toBe(0)
   expect(r.stdout.length).toBe(canvas.width * canvas.height)
   return r.stdout
@@ -65,6 +65,38 @@ function whiteRows(frame: Buffer, canvas: SubtitleCanvas): [number, number] | nu
     if (row.some(v => v > 200)) {
       if (first < 0) first = y
       last = y
+    }
+  }
+  return first < 0 ? null : [first, last]
+}
+
+/** First and last columns whose pixels differ from a mid-gray background (white text or its black outline). */
+function inkColumns(frame: Buffer, canvas: SubtitleCanvas): [number, number] | null {
+  let first = -1
+  let last = -1
+  for (let x = 0; x < canvas.width; x++) {
+    for (let y = 0; y < canvas.height; y++) {
+      if (Math.abs(frame[y * canvas.width + x]! - 128) > 40) {
+        if (first < 0) first = x
+        last = x
+        break
+      }
+    }
+  }
+  return first < 0 ? null : [first, last]
+}
+
+/** First and last columns that contain white (text fill) pixels. */
+function whiteColumns(frame: Buffer, canvas: SubtitleCanvas): [number, number] | null {
+  let first = -1
+  let last = -1
+  for (let x = 0; x < canvas.width; x++) {
+    for (let y = 0; y < canvas.height; y++) {
+      if (frame[y * canvas.width + x]! > 200) {
+        if (first < 0) first = x
+        last = x
+        break
+      }
     }
   }
   return first < 0 ? null : [first, last]
@@ -110,6 +142,39 @@ describe.skipIf(!hasFfmpeg || !fontsDir)('buildAss rendered by libass', () => {
     const bandBottom = (canvas.height + canvas.width * 9 / 16) / 2
     expect(top).toBeGreaterThan(bandBottom)
     expect(bottom).toBeLessThanOrEqual(canvas.height - subtitleStyleFor(canvas).marginV)
+  })
+
+  it('draws big characters: Fontsize 100 is about 69 px per CJK character (大字)', () => {
+    writeFileSync(path.join(tmp, 'size.ass'), buildAss([{ start: 0, end: 3, text: '一二三四五六七八九十' }], canvas))
+    const cols = whiteColumns(grabGray('size.ass', canvas, 1), canvas)
+    expect(cols).not.toBeNull()
+    const width = cols![1] - cols![0] + 1
+    // 10 characters of 100 / 1.45 px, minus the side bearings of the first and last one
+    expect(width).toBeGreaterThan(640)
+    expect(width).toBeLessThanOrEqual(Math.ceil(10 * subtitleStyleFor(canvas).fontSize / FONT_SIZE_PER_EM))
+  })
+
+  it('keeps a full two-line segment (13 characters a line) between the side margins', () => {
+    const text = '一二三四五六七八九十一二三四五六七八九十一二三四五六'
+    writeFileSync(path.join(tmp, 'full.ass'), buildAss([{ start: 0, end: 3, text }], canvas))
+    const style = subtitleStyleFor(canvas)
+    const cols = inkColumns(grabGray('full.ass', canvas, 1, 'gray'), canvas)
+    expect(cols).not.toBeNull()
+    expect(cols![0]).toBeGreaterThanOrEqual(style.marginH - style.outline)
+    expect(cols![1]).toBeLessThan(canvas.width - style.marginH + style.outline)
+  })
+
+  it.each([
+    ['a 60-character edited zh segment', '這段字幕是使用者自己補上很多漏掉的字所以變得非常非常長'.repeat(3).slice(0, 60)],
+    ['the 200 characters the editor allows', '字'.repeat(200)],
+    ['latin capitals', 'OH MY GOD THIS IS AMAZING WHAT A PLAY WE WON THE GAME'],
+  ])('shrinks %s so it stays between the side margins (never off the frame edges)', (_name, text) => {
+    writeFileSync(path.join(tmp, 'long.ass'), buildAss([{ start: 0, end: 3, text }], canvas))
+    const style = subtitleStyleFor(canvas)
+    const cols = inkColumns(grabGray('long.ass', canvas, 1, 'gray'), canvas)
+    expect(cols).not.toBeNull()
+    expect(cols![0]).toBeGreaterThanOrEqual(style.marginH - style.outline)
+    expect(cols![1]).toBeLessThan(canvas.width - style.marginH + style.outline)
   })
 
   it('draws nothing between cues', () => {

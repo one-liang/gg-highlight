@@ -89,7 +89,7 @@ function onDeleted() {
               {{ formatResolution(video.media.width, video.media.height) }}<template v-if="formatFps(video.media.fps)">・{{ formatFps(video.media.fps) }}</template>
             </span>
             <span>{{ languageLabels[video.language] }}</span>
-            <span v-if="video.media && video.media.audioTracks.length > 1">辨識用音軌 {{ video.audioTrack + 1 }}</span>
+            <span v-if="video.media && video.media.audioTracks.length > 1">分析用音軌 {{ video.audioTrack + 1 }}</span>
           </div>
         </div>
         <UButton label="移除" icon="i-lucide-trash-2" color="neutral" variant="ghost" @click="deleteOpen = true" />
@@ -113,14 +113,17 @@ function onDeleted() {
         class="mb-5"
       >
         <template #description>
-          <p>
+          <p v-if="video.analysis.status === 'done'">
             原本的檔案可能被移動、改名或刪除，因此無法預覽，也無法輸出剪輯。逐字稿與精華片段仍然可以查看與修改。
+          </p>
+          <p v-else>
+            原本的檔案可能被移動、改名或刪除，因此無法分析、預覽或輸出剪輯。
           </p>
           <p v-if="video.filePath" class="mt-1">
             原本的位置：<code class="break-all font-mono text-xs">{{ video.filePath }}</code>
           </p>
           <p class="mt-1">
-            把檔案放回原位置後重新整理這一頁即可恢復。
+            {{ video.analysis.status === 'failed' ? '把檔案放回原位置後，按下方的「重試」重新分析。' : '把檔案放回原位置後重新整理這一頁即可恢復。' }}
           </p>
         </template>
       </UAlert>

@@ -11,6 +11,9 @@ import {
   browserCommand,
   buildStatus,
   computeBuildStamp,
+  computeInstallStamp,
+  INSTALL_STAMP_FILE,
+  installStatus,
   isPortOpen,
   listenAddress,
   listStampFiles,
@@ -22,6 +25,7 @@ import {
   urlHost,
   waitForServer,
   writeBuildStamp,
+  writeInstallStamp,
 } from './start.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -118,6 +122,40 @@ describe('build stamp', () => {
   })
 })
 
+describe('install stamp', () => {
+  beforeEach(async () => {
+    await write('package.json', '{"name":"fake"}')
+    await write('pnpm-lock.yaml', 'lockfileVersion: 9')
+    await write('node_modules/.keep', '')
+  })
+
+  it('hashes the contents of package.json and the lockfile, not their mtimes', async () => {
+    const a = await computeInstallStamp(tmp)
+    expect(a).toMatch(/^[0-9a-f]{64}$/)
+    const later = new Date(Date.now() + 60_000)
+    await fs.utimes(path.join(tmp, 'package.json'), later, later)
+    expect(await computeInstallStamp(tmp)).toBe(a)
+    await write('app/app.vue', '<template />')
+    expect(await computeInstallStamp(tmp)).toBe(a)
+    await write('pnpm-lock.yaml', 'lockfileVersion: 10')
+    expect(await computeInstallStamp(tmp)).not.toBe(a)
+  })
+
+  it('needs an install without node_modules, without a stamp, after a dependency change, and not otherwise', async () => {
+    const stamp = await computeInstallStamp(tmp)
+    // installed by setup.bat (no stamp yet)
+    expect(await installStatus(tmp, stamp)).toEqual({ needed: true, reason: 'unknown' })
+    await writeInstallStamp(tmp, stamp)
+    expect(await fs.readFile(path.join(tmp, INSTALL_STAMP_FILE), 'utf8')).toBe(`${stamp}\n`)
+    expect(await installStatus(tmp, stamp)).toEqual({ needed: false, reason: null })
+    // an update added a dependency
+    await write('package.json', '{"name":"fake","dependencies":{"x":"1.0.0"}}')
+    expect(await installStatus(tmp, await computeInstallStamp(tmp))).toEqual({ needed: true, reason: 'changed' })
+    await fs.rm(path.join(tmp, 'node_modules'), { recursive: true })
+    expect(await installStatus(tmp, stamp)).toEqual({ needed: true, reason: 'missing' })
+  })
+})
+
 describe('settings', () => {
   it('parses flags', () => {
     expect(parseArgs([])).toEqual({ open: true, help: false })
@@ -142,11 +180,17 @@ describe('settings', () => {
 
   it('builds the server env without dropping existing NODE_OPTIONS', () => {
     const env = serverEnv({ NODE_OPTIONS: '--max-old-space-size=4096', GG_DATA_DIR: 'd' })
-    expect(env).toMatchObject({ HOST: '127.0.0.1', PORT: '3939', GG_DATA_DIR: 'd' })
+    expect(env).toMatchObject({ HOST: '127.0.0.1', PORT: '3939', GG_DATA_DIR: 'd', NITRO_SHUTDOWN_TIMEOUT: '3000' })
     expect(env.NODE_OPTIONS).toBe('--max-old-space-size=4096 --disable-warning=ExperimentalWarning')
     expect(serverEnv({ NODE_OPTIONS: env.NODE_OPTIONS }).NODE_OPTIONS).toBe(env.NODE_OPTIONS)
     expect(serverEnv({}).NODE_OPTIONS).toBe('--disable-warning=ExperimentalWarning')
     expect(serverEnv({ PORT: '5000', HOST: 'localhost' })).toMatchObject({ PORT: '5000', HOST: 'localhost' })
+  })
+
+  it('shortens Nitro\'s shutdown wait well below the force-kill delay, unless set', () => {
+    // An open <video> response would otherwise hold the shutdown for Nitro's default 30 s.
+    expect(Number(serverEnv({}).NITRO_SHUTDOWN_TIMEOUT)).toBeLessThanOrEqual(5000)
+    expect(serverEnv({ NITRO_SHUTDOWN_TIMEOUT: '10000' }).NITRO_SHUTDOWN_TIMEOUT).toBe('10000')
   })
 
   it('treats being ended by the stop request as a clean exit', () => {
@@ -223,7 +267,7 @@ import fs from 'node:fs'
 import http from 'node:http'
 const server = http.createServer((req, res) => {
   res.setHeader('content-type', 'application/json')
-  res.end(JSON.stringify({ url: req.url, host: process.env.HOST, port: process.env.PORT, nodeOptions: process.env.NODE_OPTIONS, cwd: process.cwd() }))
+  res.end(JSON.stringify({ url: req.url, host: process.env.HOST, port: process.env.PORT, nodeOptions: process.env.NODE_OPTIONS, shutdownTimeout: process.env.NITRO_SHUTDOWN_TIMEOUT, cwd: process.cwd() }))
 })
 if (process.env.GG_TEST_EXIT) setTimeout(() => process.exit(Number(process.env.GG_TEST_EXIT)), 50)
 else server.listen(Number(process.env.PORT), process.env.HOST)
@@ -273,15 +317,26 @@ function launch(root: string, env: Record<string, string>): Launch {
   return { child, output: () => out, waitFor, exit }
 }
 
-async function fakeRoot(withBuild: boolean) {
-  await write('node_modules/.keep', '')
+const FAKE_INSTALL = `
+import fs from 'node:fs'
+fs.appendFileSync('install-count.txt', 'i')
+`
+
+const FAKE_PACKAGE = { name: 'fake', private: true, type: 'module', scripts: { build: 'node fake-build.mjs', postinstall: 'node fake-install.mjs' } }
+
+async function fakeRoot(withBuild: boolean, { installed = true } = {}) {
   await write('app/app.vue', '<template />')
   await write('server/api/system.get.ts', 'export default 1')
   await write('shared/types/domain.ts', 'export {}')
   await write('nuxt.config.ts', 'export default {}')
   await write('fake-server.mjs', FAKE_SERVER)
   await write('fake-build.mjs', FAKE_BUILD)
-  await write('package.json', JSON.stringify({ name: 'fake', private: true, type: 'module', scripts: { build: 'node fake-build.mjs' } }))
+  await write('fake-install.mjs', FAKE_INSTALL)
+  await write('package.json', JSON.stringify(FAKE_PACKAGE))
+  if (installed) {
+    await write('node_modules/.keep', '')
+    await writeInstallStamp(tmp, await computeInstallStamp(tmp))
+  }
   if (withBuild) {
     await write('.output/server/index.mjs', FAKE_SERVER)
     await writeBuildStamp(tmp, await computeBuildStamp(tmp))
@@ -298,7 +353,7 @@ describe.skipIf(process.platform === 'win32')('main (fake project)', () => {
     expect(run.output()).not.toMatch(/pnpm build/)
 
     const info = await (await fetch(`http://127.0.0.1:${port}/api/system`)).json()
-    expect(info).toMatchObject({ url: '/api/system', host: '127.0.0.1', port: String(port), cwd: await fs.realpath(tmp) })
+    expect(info).toMatchObject({ url: '/api/system', host: '127.0.0.1', port: String(port), shutdownTimeout: '3000', cwd: await fs.realpath(tmp) })
     expect(info.nodeOptions).toContain('--disable-warning=ExperimentalWarning')
 
     run.child.kill('SIGTERM')
@@ -364,5 +419,52 @@ describe.skipIf(process.platform === 'win32')('main (fake project)', () => {
     expect(await third.exit).toBe(0)
 
     expect(await fs.readFile(path.join(tmp, 'build-count.txt'), 'utf8')).toBe('xx')
+    expect(existsSync(path.join(tmp, 'install-count.txt'))).toBe(false)
+  })
+
+  it.skipIf(!hasPnpm)('runs pnpm install without node_modules and after a dependency change, before building', async () => {
+    await fakeRoot(true, { installed: false })
+    const port = String(await freePort())
+    const marker = path.join(tmp, 'm')
+    const installs = () => fs.readFile(path.join(tmp, 'install-count.txt'), 'utf8').catch(() => '')
+
+    const first = launch(tmp, { PORT: port, GG_TEST_MARKER: marker })
+    await first.waitFor(/gg-highlight 已啟動/, 60_000)
+    expect(first.output()).toMatch(/第一次啟動：安裝套件/)
+    first.child.kill('SIGTERM')
+    expect(await first.exit).toBe(0)
+    expect(await installs()).toBe('i')
+    expect(existsSync(path.join(tmp, INSTALL_STAMP_FILE))).toBe(true)
+
+    // nothing changed: no install
+    const second = launch(tmp, { PORT: port, GG_TEST_MARKER: marker })
+    await second.waitFor(/gg-highlight 已啟動/)
+    expect(second.output()).not.toMatch(/pnpm install/)
+    second.child.kill('SIGTERM')
+    expect(await second.exit).toBe(0)
+    expect(await installs()).toBe('i')
+
+    // an update changed package.json (a new dependency would go here): install, then rebuild
+    await write('package.json', JSON.stringify({ ...FAKE_PACKAGE, description: 'updated' }))
+    const third = launch(tmp, { PORT: port, GG_TEST_MARKER: marker })
+    await third.waitFor(/gg-highlight 已啟動/, 60_000)
+    const out = third.output()
+    expect(out).toMatch(/套件有更新，安裝套件/)
+    expect(out).toMatch(/程式有更新，重新建置/)
+    expect(out.indexOf('套件有更新')).toBeLessThan(out.indexOf('程式有更新'))
+    third.child.kill('SIGTERM')
+    expect(await third.exit).toBe(0)
+    expect(await installs()).toBe('ii')
+  })
+
+  it.skipIf(!hasPnpm)('checks the packages once when node_modules came from somewhere else (setup.bat)', async () => {
+    await fakeRoot(true, { installed: false })
+    await write('node_modules/.keep', '')
+    const run = launch(tmp, { PORT: String(await freePort()), GG_TEST_MARKER: path.join(tmp, 'm') })
+    await run.waitFor(/gg-highlight 已啟動/, 60_000)
+    expect(run.output()).toMatch(/確認套件是否齊全/)
+    run.child.kill('SIGTERM')
+    expect(await run.exit).toBe(0)
+    expect(existsSync(path.join(tmp, INSTALL_STAMP_FILE))).toBe(true)
   })
 })

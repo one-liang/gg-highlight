@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import type { Highlight, HighlightStatus } from '../../shared/types/domain'
+import { formatDuration, formatTime, parseTime } from './time'
 import {
   countHighlights,
+  END_SLACK_SECONDS,
   filterHighlights,
   isOverShortsLimit,
   sortHighlights,
@@ -65,6 +67,43 @@ describe('validateHighlightRange', () => {
     expect(validateHighlightRange(20, 20, 100)).toBe('終點必須晚於起點')
     expect(validateHighlightRange(20, 20.4, 100)).toBe('精華片段至少要 0.5 秒')
   })
+
+  it('accepts the rounded length the page shows as the end (it can be above the real length)', () => {
+    // 0:17.86 is shown as 0:17.9 (formatTime) and 0:18 (formatDuration in the header)
+    expect(validateHighlightRange(1, parseTime(formatTime(17.86)), 17.86)).toBeNull()
+    expect(validateHighlightRange(1, parseTime(formatDuration(17.86)), 17.86)).toBeNull()
+    // past an hour formatTime drops the tenths: 1:02:05.6 is shown as 1:02:06
+    expect(formatTime(3725.6)).toBe('1:02:06')
+    expect(validateHighlightRange(3700, 3726, 3725.6)).toBeNull()
+    expect(validateHighlightRange(7000, parseTime(formatDuration(7199.7)), 7199.7)).toBeNull()
+    expect(validateHighlightRange(1, 17.86 + END_SLACK_SECONDS, 17.86)).toBeNull()
+  })
+
+  it('names a length in its messages that it accepts itself', () => {
+    expect(validateHighlightRange(1, 18.4, 17.86)).toBe('終點超過影片長度（0:17.8）')
+    expect(validateHighlightRange(17.88, 18, 17.86)).toBe('起點超過影片長度（0:17.8）')
+    expect(validateHighlightRange(3700, 3727, 3725.6)).toBe('終點超過影片長度（1:02:05.6）')
+    for (const duration of [17.86, 59.99, 3725.6, 7199.7, 100]) {
+      const message = validateHighlightRange(0, duration + 5, duration)
+      const shown = /（(.+)）/.exec(message ?? '')?.[1]
+      expect(shown, message ?? '').toBeTruthy()
+      expect(validateHighlightRange(0, parseTime(shown!), duration), `${duration}: ${shown}`).toBeNull()
+    }
+  })
+
+  it('checks the length after clamping an end past the video', () => {
+    expect(validateHighlightRange(17.5, 17.9, 17.86)).toBe('精華片段至少要 0.5 秒')
+    expect(validateHighlightRange(17.3, 17.9, 17.86)).toBeNull()
+  })
+
+  it('accepts every displayed form of every length as the end', () => {
+    for (let tenth = 6; tenth < 80_000; tenth += 7) {
+      const duration = tenth / 10 + (tenth % 3) * 0.033
+      for (const shown of [formatTime(duration), formatDuration(duration)]) {
+        expect(validateHighlightRange(0, parseTime(shown), duration), `${duration} shown as ${shown}`).toBeNull()
+      }
+    }
+  })
 })
 
 describe('status helpers', () => {
@@ -77,7 +116,15 @@ describe('status helpers', () => {
     expect(statusTransitions('candidate')).toEqual(['selected', 'dismissed'])
     expect(statusTransitions('selected')).toEqual(['dismissed', 'candidate'])
     expect(statusTransitions('dismissed')).toEqual(['selected', 'candidate'])
+    expect(statusTransitions('dismissed', 'analysis')).toEqual(['selected', 'candidate'])
     expect(statusActionLabels.candidate).toBe('改回候選')
+  })
+
+  it('never offers 改回候選 for a manual Highlight (it was never a Candidate)', () => {
+    expect(statusTransitions('selected', 'manual')).toEqual(['dismissed'])
+    expect(statusTransitions('dismissed', 'manual')).toEqual(['selected'])
+    // a manual one stored as candidate (API) can still be decided
+    expect(statusTransitions('candidate', 'manual')).toEqual(['selected', 'dismissed'])
   })
 
   it('builds a drawable range only when complete', () => {

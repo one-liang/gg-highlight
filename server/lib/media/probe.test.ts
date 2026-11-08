@@ -65,6 +65,10 @@ describe('probeMedia (real ffprobe)', () => {
     const junk = path.join(dir, 'junk.mp4')
     await import('node:fs/promises').then(fs => fs.writeFile(junk, 'not a video'))
     await expect(probeMedia(tools, junk)).rejects.toThrow(/^無法讀取影片：/)
+    // the message names the problem, not the (possibly internal, e.g. data/uploads/<id>.mp4) path
+    const message = await probeMedia(tools, junk).then(() => '', (err: Error) => err.message)
+    expect(message).not.toContain(junk)
+    expect(message).not.toContain('junk.mp4')
   })
 
   it('counts audio tracks without needing video', async () => {

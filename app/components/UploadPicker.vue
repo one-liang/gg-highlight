@@ -92,6 +92,9 @@ function onDrop(e: DragEvent) {
 }
 
 onBeforeUnmount(() => {
+  // closing the dialog mid-upload cancels it; clear `busy` now, because emits after unmount are dropped
+  // and the dialog would otherwise stay non-dismissible the next time it opens
+  busy.value = false
   handle?.abort()
 })
 </script>

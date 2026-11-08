@@ -13,6 +13,7 @@ export default defineEventHandler(async (): Promise<SystemInfo> => {
   return {
     version: (pkg as { version?: string }).version ?? '0.0.0',
     videoEncoder,
+    videoEncoderForced: config.videoEncoderOverride !== null,
     dataDir: config.dataDir,
     fontsReady: fonts,
   }

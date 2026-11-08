@@ -1,4 +1,6 @@
-// Startup: open the database, put interrupted work back in the queues, start them, tidy old uploads.
+// Startup: listen address defaults, open the database, put interrupted work back in the queues,
+// start them, tidy old uploads.
+import { applyListenDefaults } from '../lib/config'
 import { cleanupOrphanUploads } from '../lib/library'
 import { resetServices, useServices } from '../lib/services'
 
@@ -16,6 +18,10 @@ function openServices() {
 
 // Nitro calls plugins synchronously (a returned promise is not awaited), so the async part is chained below.
 export default defineNitroPlugin((nitroApp) => {
+  // 127.0.0.1:3939 unless HOST / PORT are set. Nitro's node server reads them right after the
+  // plugins have run (plugins run synchronously when the app is created, before it listens).
+  applyListenDefaults(process.env)
+
   // Nothing heavy while Nuxt prerenders or prepares the build.
   if (import.meta.prerender) return
 

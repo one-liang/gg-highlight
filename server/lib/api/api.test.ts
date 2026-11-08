@@ -4,9 +4,9 @@ import path from 'node:path'
 import { H3Error } from 'h3'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import {
-  addVideoSchema, asHttpError, checkHighlightRange, clipDownloadName, createClipSchema, fileNameClock, httpError, isHttpError,
-  normalizeWatchFolders, parseIndexParam, parseWith, safeFileNamePart, settingsSchema, titleFromFileName, updateHighlightSchema,
-  updateSegmentSchema,
+  addVideoSchema, allowedMethods, asHttpError, checkHighlightRange, clipDownloadName, createClipSchema, END_SLACK_SECONDS, fileNameClock, httpError, isHttpError,
+  normalizeWatchFolders, parseIndexParam, parseWith, safeFileNamePart, settingsSchema, titleFromFileName, unreadableVideo,
+  updateHighlightSchema, updateSegmentSchema,
 } from '.'
 
 function statusOf(fn: () => unknown): { statusCode: number, statusMessage: string } {
@@ -48,6 +48,14 @@ describe('httpError', () => {
     expect(wrapped.statusCode).toBe(422)
     expect(wrapped.statusMessage).toBe('無法讀取：boom')
     expect(isHttpError(new Error('x'))).toBe(false)
+  })
+
+  it('unreadableVideo is a 422 that does not repeat probeMedia\'s prefix', () => {
+    const err = unreadableVideo(new Error('無法讀取影片：Invalid data found when processing input\nmore'))
+    expect(err.statusCode).toBe(422)
+    expect(err.statusMessage).toBe('無法讀取這個影片檔：Invalid data found when processing input')
+    expect(unreadableVideo(new Error('無法讀取影片：找不到影像軌')).statusMessage).toBe('無法讀取這個影片檔：找不到影像軌')
+    expect(unreadableVideo(new Error('')).statusMessage).toBe('無法讀取這個影片檔')
   })
 })
 
@@ -100,6 +108,20 @@ describe('checkHighlightRange', () => {
     expect(checkHighlightRange(5, 10.0004, 10)).toEqual({ start: 5, end: 10 })
   })
 
+  it('accepts an end up to the rounding of the shown length past the video, clamped to the length', () => {
+    // 17.86 s is shown as 0:17.9 / 0:18; 1:02:05.6 as 1:02:06; 1:59:59.7 as 2:00:00
+    expect(checkHighlightRange(1, 17.9, 17.86)).toEqual({ start: 1, end: 17.86 })
+    expect(checkHighlightRange(1, 18, 17.86)).toEqual({ start: 1, end: 17.86 })
+    expect(checkHighlightRange(0, 3726, 3725.6)).toEqual({ start: 0, end: 3725.6 })
+    expect(checkHighlightRange(7000, 7200, 7199.7)).toEqual({ start: 7000, end: 7199.7 })
+    expect(checkHighlightRange(1, 17.86 + END_SLACK_SECONDS, 17.86)).toEqual({ start: 1, end: 17.86 })
+    // the length named in the message is accepted too
+    expect(statusOf(() => checkHighlightRange(1, 18.4, 17.86))).toEqual({ statusCode: 422, statusMessage: '終點不能超過影片長度（0:17）' })
+    expect(checkHighlightRange(1, 17, 17.86)).toEqual({ start: 1, end: 17 })
+    // the minimum length counts from the clamped end
+    expect(statusOf(() => checkHighlightRange(17.5, 17.9, 17.86))).toEqual({ statusCode: 422, statusMessage: '精華片段至少要 0.5 秒' })
+  })
+
   it('rejects everything else with a 422', () => {
     const cases: Array<[number, number, string]> = [
       [-0.1, 2, '起點不能小於 0'],
@@ -111,6 +133,24 @@ describe('checkHighlightRange', () => {
     for (const [start, end, message] of cases) {
       expect(statusOf(() => checkHighlightRange(start, end, 65.2))).toEqual({ statusCode: 422, statusMessage: message })
     }
+  })
+})
+
+describe('allowedMethods (the /api/** fallback)', () => {
+  const h = () => {}
+  it('lists the methods of the route that matched the path', () => {
+    expect(allowedMethods({ path: '/api/settings', handlers: { get: h, put: h } }, '/api/**')).toEqual(['GET', 'HEAD', 'PUT'])
+    expect(allowedMethods({ path: '/api/videos/:id/retry', handlers: { post: h } }, '/api/**')).toEqual(['POST'])
+  })
+
+  it('ignores the catch-all that h3 caches on a route as its \'all\' handler', () => {
+    expect(allowedMethods({ path: '/api/videos/:id', handlers: { get: h, delete: h, all: h } }, '/api/**')).toEqual(['DELETE', 'GET', 'HEAD'])
+  })
+
+  it('is empty when only the catch-all matched (an unknown path)', () => {
+    expect(allowedMethods({ path: '/api/**', handlers: { all: h } }, '/api/**')).toEqual([])
+    expect(allowedMethods(undefined, '/api/**')).toEqual([])
+    expect(allowedMethods({ path: '/api/x' }, '/api/**')).toEqual([])
   })
 })
 

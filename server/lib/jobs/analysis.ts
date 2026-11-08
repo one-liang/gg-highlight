@@ -4,7 +4,7 @@ import path from 'node:path'
 import type { AnalysisStep, MediaInfo } from '../../../shared/types/domain'
 import { videoWorkDir } from '../config'
 import type { VideoRecord } from '../db'
-import { detectVideoEncoder, extractAudio, preparePreview, probeMedia } from '../media'
+import { detectVideoEncoder, encoderFallbackMessage, extractAudio, preparePreview, probeMedia } from '../media'
 import { buildTranscriptSegments } from '../subtitles'
 import { runTranscriber } from '../transcription'
 import { CANCELLED_MESSAGE, MISSING_SOURCE_MESSAGE, readableError } from './errors'
@@ -97,7 +97,12 @@ export async function runAnalysis(deps: JobDeps, videoId: string, signal: AbortS
 
     progress.step('prepare-preview')
     const encoder = await detectVideoEncoder(tools, config.videoEncoderOverride)
-    const { previewPath } = await preparePreview(tools, { filePath, media }, files.preview, { signal, encoder, onProgress })
+    const { previewPath } = await preparePreview(tools, { filePath, media }, files.preview, {
+      signal,
+      encoder,
+      onProgress,
+      onEncoderFallback: err => deps.log(`[analysis ${videoId}] ${encoderFallbackMessage(err)}`),
+    })
     // A playable original needs no preview; drop one left from an earlier run.
     if (!previewPath) await removeQuietly(files.preview)
     throwIfAborted(signal)

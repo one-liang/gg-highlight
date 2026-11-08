@@ -167,7 +167,7 @@ async function saveRange() {
           @click="togglePlay"
         />
         <UButton
-          v-for="s in statusTransitions(h.status)"
+          v-for="s in statusTransitions(h.status, h.origin)"
           :key="s"
           :label="statusActionLabels[s]"
           :icon="STATUS_ICON[s]"

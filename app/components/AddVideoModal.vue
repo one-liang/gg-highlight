@@ -12,13 +12,14 @@ const uploading = ref(false)
 const tabs = [
   { label: '影片資料夾', value: 'folder', icon: 'i-lucide-folder-open' },
   { label: '上傳檔案', value: 'upload', icon: 'i-lucide-upload' },
-  { label: 'YouTube', value: 'youtube', icon: 'i-lucide-youtube', disabled: true, badge: { label: '里程碑 3 推出', color: 'neutral' as const, variant: 'soft' as const, size: 'xs' as const } },
+  { label: 'YouTube', value: 'youtube', icon: 'i-lucide-youtube', disabled: true, badge: { label: '即將推出', color: 'neutral' as const, variant: 'soft' as const, size: 'xs' as const } },
 ]
 
 watch(open, (isOpen) => {
   if (!isOpen) {
     picked.value = null
     tab.value = 'folder'
+    uploading.value = false
   }
 })
 

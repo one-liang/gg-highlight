@@ -5,7 +5,7 @@ import { beforeAll, describe, expect, it } from 'vitest'
 import type { MediaInfo } from '../../../shared/types/domain'
 import { probeMedia } from './probe'
 import { evenDim, fitShortSide, preparePreview, previewArgs, previewPlan, previewSize } from './preview'
-import { fx, makeTmpDir, rawProbe, tools } from './test-utils'
+import { CAN_FAKE_FFMPEG, fakeFfmpegCalls, fx, makeTmpDir, rawProbe, tools, writeFailingNvencFfmpeg } from './test-utils'
 
 function media(over: Partial<MediaInfo> & { audio?: string[] } = {}): MediaInfo {
   const { audio = ['aac'], ...rest } = over
@@ -212,14 +212,45 @@ describe('preparePreview (real ffmpeg)', () => {
     expect(rawProbe(out).streams.find(s => s.codec_type === 'video')!.codec_name).toBe('h264')
   })
 
-  it('removes the temp file when ffmpeg fails (NVENC without a GPU)', async () => {
+  it('removes the temp file when ffmpeg fails', async () => {
     const info = await probeMedia(tools, mpeg4Mkv)
+    const broken = path.join(await makeTmpDir(), 'broken.mkv')
+    await fs.writeFile(broken, Buffer.alloc(4096, 7))
     const dir = await makeTmpDir()
-    const err = await preparePreview(tools, { filePath: mpeg4Mkv, media: info }, path.join(dir, 'preview.mp4'), { encoder: 'h264_nvenc' })
+    const err = await preparePreview(tools, { filePath: broken, media: info }, path.join(dir, 'preview.mp4'), { encoder: 'libx264' })
       .catch(e => e) as Error
     expect(err).toBeInstanceOf(Error)
     expect(err.message).toMatch(/ffmpeg 執行失敗/)
     expect(await fs.readdir(dir)).toEqual([])
+  })
+
+  it.skipIf(!CAN_FAKE_FFMPEG)('redoes the transcode with libx264 when NVENC fails at runtime (injected busy NVENC)', async () => {
+    const fake = await writeFailingNvencFfmpeg(await makeTmpDir())
+    const info = await probeMedia(tools, mpeg4Mkv)
+    const dir = await makeTmpDir()
+    const out = path.join(dir, 'preview.mp4')
+    const fallbacks: unknown[] = []
+    const result = await preparePreview({ ...tools, ffmpegPath: fake.ffmpegPath }, { filePath: mpeg4Mkv, media: info }, out, {
+      encoder: 'h264_nvenc',
+      onEncoderFallback: err => fallbacks.push(err),
+    })
+    expect(result).toEqual({ previewPath: out })
+    expect(await fakeFfmpegCalls(fake.calls)).toEqual(['h264_nvenc', 'libx264'])
+    expect(fallbacks).toHaveLength(1)
+    expect(rawProbe(out).streams.find(s => s.codec_type === 'video')).toMatchObject({ codec_name: 'h264', width: 1280, height: 720 })
+    expect(await fs.readdir(dir)).toEqual(['preview.mp4'])
+  })
+
+  it.skipIf(!CAN_FAKE_FFMPEG)('a remux never involves NVENC, so nothing falls back', async () => {
+    const fake = await writeFailingNvencFfmpeg(await makeTmpDir())
+    const info = await probeMedia(tools, fx.sampleEnMkv)
+    const fallbacks: unknown[] = []
+    await preparePreview({ ...tools, ffmpegPath: fake.ffmpegPath }, { filePath: fx.sampleEnMkv, media: info }, path.join(await makeTmpDir(), 'preview.mp4'), {
+      encoder: 'h264_nvenc',
+      onEncoderFallback: err => fallbacks.push(err),
+    })
+    expect(await fakeFfmpegCalls(fake.calls)).toEqual(['copy'])
+    expect(fallbacks).toEqual([])
   })
 
   it('removes the temp file when the input is missing', async () => {

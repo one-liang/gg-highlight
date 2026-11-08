@@ -47,7 +47,7 @@
 
 **雙擊 `start.bat`**。
 
-- 第一次啟動（或更新程式之後）會先建置，大約 1–2 分鐘。
+- 第一次啟動（或更新程式之後）會先安裝需要的套件並建置，大約 1–2 分鐘。
 - 準備好之後會自動打開瀏覽器到 **http://127.0.0.1:3939**。
 - 只有這台電腦能連線，同一個網路的其他裝置連不到。
 - 使用期間請保持那個黑色視窗開著；**關閉視窗或按 Ctrl+C 就會停止**。
@@ -57,7 +57,7 @@
 ## 使用流程
 
 1. **設定影片資料夾**：到「設定」加入你的錄影資料夾（例如 OBS 的錄影資料夾，可以加好幾個）。系統只會列出資料夾裡的影片檔（不含子資料夾），直接使用原檔，不會複製。
-2. **加入影片**：從影片資料夾的清單挑一支，或把影片檔拖進頁面上傳（上傳會複製一份到 `data/uploads/`）。加入時選：
+2. **加入影片**：按「加入影片」，從「影片資料夾」分頁的清單挑一支，或在「上傳檔案」分頁選擇或拖入影片檔上傳（上傳會複製一份到 `data/uploads/`）。加入時選：
    - **語言**：中文（可以中英夾雜）或英文，決定用哪個語音辨識模型。
    - **分析用音軌**：影片有好幾條音軌時，選「只有人聲」的那條辨識效果最好（見下面的 OBS 設定）。
 3. **分析**：加入後會自動排隊分析（一次跑一支），步驟是讀取影片資訊 → 抽出音訊 → 語音辨識 → 準備預覽。可以關掉網頁，分析會在背景繼續；失敗的可以按「重試」。
@@ -99,7 +99,7 @@ node scripts\doctor.mjs
 | 狀況 | 說明與處理 |
 | --- | --- |
 | 語音辨識環境顯示「CUDA 裝置 0 個」 | 找不到可用的 NVIDIA 顯示卡，語音辨識會改用 CPU，非常慢。請確認有 NVIDIA 顯示卡、到 [NVIDIA 官網](https://www.nvidia.com/Download/index.aspx) 更新驅動程式，再重新執行 doctor。所需的 CUDA 函式庫（cuBLAS）已經由 Python 環境自動安裝，不用另外裝 CUDA Toolkit。想強制用 CPU：設定環境變數 `GG_ASR_DEVICE=cpu`。 |
-| NVENC 硬體編碼無法使用 | 輸出剪輯會自動改用 CPU（libx264）編碼，結果一樣只是比較慢。請更新顯示卡驅動程式，並使用 setup.bat 安裝的 Gyan.FFmpeg。想強制用 CPU：`GG_VIDEO_ENCODER=libx264`。 |
+| NVENC 硬體編碼無法使用 | 輸出剪輯會自動改用 CPU（libx264）編碼，結果一樣只是比較慢。NVENC 偶爾失敗（例如 OBS 正在用 NVENC 錄影）時，那一次也會自動改用 CPU 重新編碼。請更新顯示卡驅動程式，並使用 setup.bat 安裝的 Gyan.FFmpeg。想強制用 CPU：`GG_VIDEO_ENCODER=libx264`。 |
 | 字幕字型缺少、字幕變成方塊 | 執行 `node scripts\fetch-fonts.mjs`。下載不了的話，手動下載 [NotoSansCJKtc-Bold.otf](https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/TraditionalChinese/NotoSansCJKtc-Bold.otf) 放進專案的 `fonts\` 資料夾。 |
 | 「連接埠 3939 已經被其他程式使用」 | 可能 gg-highlight 已經開著（直接用瀏覽器開 http://127.0.0.1:3939 即可），或是別的程式占用了。換一個連接埠：在命令提示字元執行 `set PORT=4000` 再執行 `start.bat`。 |
 | 模型下載失敗或很慢 | 確認網路可以連到 huggingface.co，再重新執行 `setup.bat`（已下載的部分會保留）。也可以單獨下載：`uv run --project transcriber gg-transcribe download --model SoybeanMilk/faster-whisper-Breeze-ASR-25`。模型放在 `%USERPROFILE%\.cache\huggingface`，空間不夠可以設定環境變數 `HF_HOME` 換到別的磁碟。 |
@@ -122,6 +122,13 @@ pnpm test:e2e     # Playwright：啟動整個 app 走一次完整流程
 pnpm build        # 建置到 .output/
 pnpm start        # 等於 node scripts/start.mjs：需要時自動 install / build，再啟動並打開瀏覽器
 ```
+
+`pnpm test:e2e`（`tests/e2e/`，設定在 `playwright.config.ts`）：
+
+- 第一次要先下載 Playwright 的 Chromium：`npx playwright install chromium`。已經有別的 Chromium 的話，可以改用環境變數 `PW_CHROMIUM_PATH` 指定執行檔（例如 `PW_CHROMIUM_PATH=/opt/pw-browsers/chromium-1194/chrome-linux/chrome pnpm test:e2e`）。
+- 會自己啟動 app：原始碼有變才 `pnpm build`，再用一個暫時的資料夾、隨機連接埠、`Systran/faster-whisper-tiny`（CPU）與 `libx264` 執行 `.output/server/index.mjs`，跑完刪掉暫時資料夾。tiny 模型第一次會從 Hugging Face 下載。
+- 測試只檢查頁面與 API，不依賴瀏覽器實際播放影片（開源版的 Chromium 不能解碼 H.264／AAC，這時預覽區顯示「瀏覽器不支援這個格式」是正常的）。
+- 設定 `E2E_SHOTS_DIR=<資料夾>` 會把主要頁面的全頁截圖存到那裡；失敗時的截圖與 trace 在 `test-results/`，報告用 `npx playwright show-report` 開。
 
 其他腳本：
 

@@ -16,8 +16,12 @@ export { extractAudio } from './audio'
  */
 export { preparePreview, previewPlan, previewSize } from './preview'
 
-/** detectVideoEncoder: h264_nvenc when a tiny test encode succeeds, else libx264. Cached per ffmpeg path. */
-export { clearVideoEncoderCache, detectVideoEncoder } from './encoder'
+/**
+ * detectVideoEncoder: h264_nvenc when a tiny test encode succeeds, else libx264. Cached per ffmpeg path.
+ * withEncoderFallback: redoes a failed h264_nvenc encode once with libx264 (exportClip / preparePreview use it).
+ */
+export { clearVideoEncoderCache, detectVideoEncoder, encoderFallbackMessage, withEncoderFallback } from './encoder'
+export type { EncoderFallbackOptions } from './encoder'
 
 export { escapeFilterPath, escapeFilterValue } from './escape'
 

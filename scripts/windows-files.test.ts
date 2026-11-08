@@ -86,3 +86,29 @@ describe('bat entry points', () => {
     expect(text).toMatch(/pause/)
   })
 })
+
+describe('.gitattributes', () => {
+  const rules = new Map<string, string[]>()
+  for (const line of read('.gitattributes').toString('utf8').split(/\r?\n/)) {
+    const [pattern, ...attrs] = line.replace(/#.*$/, '').trim().split(/\s+/)
+    if (pattern) rules.set(pattern, attrs)
+  }
+
+  it('checks the Windows entry points out with CRLF and shell scripts with LF, whatever core.autocrlf says', () => {
+    for (const pattern of ['*.bat', '*.cmd', '*.ps1']) expect(rules.get(pattern), pattern).toEqual(['text', 'eol=crlf'])
+    expect(rules.get('*.sh')).toEqual(['text', 'eol=lf'])
+  })
+
+  it('keeps media, fonts and images binary, but not TypeScript', () => {
+    for (const pattern of ['*.mp4', '*.mkv', '*.mov', '*.webm', '*.wav', '*.otf', '*.ttf', '*.ttc', '*.png', '*.db']) {
+      expect(rules.get(pattern), pattern).toEqual(['binary'])
+    }
+    for (const pattern of ['*.ts', '*.mts', '*.vue', '*.mjs']) expect(rules.has(pattern), pattern).toBe(false)
+  })
+
+  it('setup.ps1 has CRLF line endings like the .bat files', () => {
+    const text = read('scripts/setup.ps1').toString('utf8')
+    expect(text).toContain('\r\n')
+    expect(text.replace(/\r\n/g, '')).not.toMatch(/\n/)
+  })
+})

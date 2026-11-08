@@ -2,6 +2,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import type { Layout, MediaInfo } from '../../../shared/types/domain'
+import { type EncoderFallbackOptions, withEncoderFallback } from './encoder'
 import { escapeFilterPath } from './escape'
 import { writeAtomically } from './files'
 import { fitShortSide } from './preview'
@@ -83,7 +84,13 @@ export function buildExportArgs(job: ExportJob): string[] {
   ]
 }
 
-export async function exportClip(tools: MediaTools, job: ExportJob, opts: RunOptions = {}): Promise<void> {
+/** Exports one Clip; an h264_nvenc encode that fails is redone once with libx264 (onEncoderFallback). */
+export async function exportClip(
+  tools: MediaTools,
+  job: ExportJob,
+  opts: RunOptions & { onEncoderFallback?: EncoderFallbackOptions['onFallback'] } = {},
+): Promise<void> {
+  const { onEncoderFallback, ...runOpts } = opts
   // Absolute paths: ffmpeg runs with cwd = the ASS folder.
   const assPath = job.assPath ? path.resolve(job.assPath) : null
   const resolved: ExportJob = {
@@ -102,11 +109,11 @@ export async function exportClip(tools: MediaTools, job: ExportJob, opts: RunOpt
       throw new Error('找不到字幕檔')
     })
   }
-  await writeAtomically(resolved.output, tmp => runFfmpeg(tools, buildExportArgs({ ...resolved, output: tmp }), {
-    ...opts,
-    cwd: assPath ? path.dirname(assPath) : opts.cwd,
+  await withEncoderFallback(resolved.encoder, encoder => writeAtomically(resolved.output, tmp => runFfmpeg(tools, buildExportArgs({ ...resolved, encoder, output: tmp }), {
+    ...runOpts,
+    cwd: assPath ? path.dirname(assPath) : runOpts.cwd,
     durationSec: job.end - job.start,
-  }))
+  })), { signal: runOpts.signal, onFallback: onEncoderFallback })
 }
 
 /** True when fontsDir holds at least one .otf/.ttf/.ttc file. */

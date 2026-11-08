@@ -5,11 +5,14 @@ type ConvertFn = (text: string) => string
 
 let converter: ConvertFn | null = null
 
-/** Simplified → Taiwan Traditional with Taiwan phrases (OpenCC cn → twp). */
+/**
+ * Simplified → Taiwan Traditional with Taiwan phrases (OpenCC cn → twp). OpenCC writes the formal
+ * 臺 (台灣 → 臺灣, 舞台 → 舞臺); subtitles use the everyday 台, as Taiwanese text does.
+ */
 export function toTaiwanTraditional(text: string): string {
   if (!text) return text
   converter ??= Converter({ from: 'cn', to: 'twp' })
-  return converter(text)
+  return converter(text).replace(/臺/gu, '台')
 }
 
 // Ideographs (incl. radicals, extensions, compatibility), kana, bopomofo, hangul,
@@ -63,6 +66,31 @@ export function textUnits(text: string): number {
     units += isWideCode(cp) ? 1 : 0.5
   }
   return units
+}
+
+// Advance widths of ASCII U+0020–U+007E in the bold subtitle font (Noto Sans CJK TC Bold), in 1/1000 em.
+const ASCII_ADVANCE = [
+  227, 370, 574, 590, 590, 963, 740, 325, 378, 378, 507, 590, 325, 370, 325, 387,
+  590, 590, 590, 590, 590, 590, 590, 590, 590, 590, 325, 325, 590, 590, 590, 514,
+  1007, 641, 681, 656, 714, 615, 585, 717, 757, 330, 568, 686, 578, 853, 749, 770,
+  667, 770, 682, 624, 625, 748, 619, 915, 627, 580, 613, 378, 387, 378, 590, 567,
+  626, 591, 644, 527, 644, 581, 372, 597, 640, 304, 306, 604, 315, 964, 641, 626,
+  644, 644, 436, 495, 421, 637, 576, 863, 562, 574, 511, 378, 296, 378, 590,
+]
+
+/**
+ * Rendered width of text in em of the subtitle font: CJK / full-width characters 1, ASCII by the
+ * font's own advance widths, anything else 1 (the CJK font draws curly quotes, … and · full width).
+ * Unlike textUnits (which segmentation and wrapping count in) this is close to what libass draws.
+ */
+export function textEm(text: string): number {
+  let milli = 0
+  for (let i = 0; i < text.length; i++) {
+    const cp = text.codePointAt(i)!
+    if (cp > 0xFFFF) i++
+    milli += cp >= 0x20 && cp <= 0x7E ? ASCII_ADVANCE[cp - 0x20]! : 1000
+  }
+  return milli / 1000
 }
 
 /** The code point that ends right before `offset` (UTF-16 index). */

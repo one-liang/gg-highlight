@@ -89,7 +89,7 @@ describe('system and settings', () => {
     const res = await api<SystemInfo>(base, 'GET', '/api/system')
     expect(res.status).toBe(200)
     const pkg = JSON.parse(await fsp.readFile(path.join(ROOT_DIR, 'package.json'), 'utf8')) as { version: string }
-    expect(res.body).toEqual({ version: pkg.version, videoEncoder: 'libx264', dataDir, fontsReady: true })
+    expect(res.body).toEqual({ version: pkg.version, videoEncoder: 'libx264', videoEncoderForced: true, dataDir, fontsReady: true })
     expect(fs.existsSync(path.join(dataDir, 'gg-highlight.db'))).toBe(true)
   })
 
@@ -101,6 +101,44 @@ describe('system and settings', () => {
     }
     const page = await fetch(`${base}/settings`)
     expect(page.headers.get('content-type')).toContain('text/html')
+  })
+
+  it('a known API path asked with another method answers a JSON 405 (not the SPA page), every time', async () => {
+    const cases: Array<[string, string, string]> = [
+      ['DELETE', '/api/settings', 'GET, HEAD, PUT'],
+      ['POST', '/api/system', 'GET, HEAD'],
+      ['PUT', '/api/videos/abc', 'DELETE, GET, HEAD'],
+      ['GET', '/api/videos/abc/retry', 'POST'],
+      ['PATCH', '/api/videos', 'GET, HEAD, POST'],
+      ['GET', '/api/highlights/abc', 'PATCH'],
+      ['DELETE', '/api/videos/abc/transcript/0', 'PATCH'],
+      ['PUT', '/api/uploads', 'POST'],
+    ]
+    // twice: h3 caches the fallback on the route after the first miss
+    for (let round = 0; round < 2; round++) {
+      for (const [method, url, allow] of cases) {
+        const res = await api(base, method, url)
+        expect(res.status, `${method} ${url}`).toBe(405)
+        expect(res.headers.get('content-type'), `${method} ${url}`).toContain('application/json')
+        expect(res.headers.get('allow'), `${method} ${url}`).toBe(allow)
+        expect(res.body.statusMessage).toBe('不支援這個請求方法')
+      }
+    }
+    // HEAD of a GET route is answered like the GET, without a body
+    const head = await fetch(`${base}/api/system`, { method: 'HEAD' })
+    expect(head.status).toBe(200)
+    expect(head.headers.get('content-type')).toContain('application/json')
+    expect(await head.text()).toBe('')
+    // the real routes still answer their own methods
+    expect((await api(base, 'GET', '/api/settings')).status).toBe(200)
+    expect((await api(base, 'GET', '/api/videos/abc')).status).toBe(404)
+    expect((await api(base, 'GET', '/api/videos/abc')).body.statusMessage).not.toBe('找不到這個 API')
+    expect((await api(base, 'DELETE', '/api/videos/abc')).status).toBe(404)
+    for (const url of ['/api', '/api/']) {
+      const res = await api(base, 'GET', url)
+      expect(res.status, url).toBe(404)
+      expect(res.body.statusMessage, url).toBe('找不到這個 API')
+    }
   })
 
   it('GET /api/settings starts empty', async () => {
@@ -333,6 +371,11 @@ describe('a watch-folder video end to end', () => {
     expect(dismissed.body.status).toBe('dismissed')
     const moved = await api<Highlight>(base, 'PATCH', `/api/highlights/${early.body.id}`, { end: 1.75 })
     expect(moved.body).toMatchObject({ start: 0.5, end: 1.75, status: 'dismissed' })
+    // The page shows the length rounded (up to 0.5 s above the real one): such an end is clamped.
+    const clamped = await api<Highlight>(base, 'PATCH', `/api/highlights/${early.body.id}`, { end: duration + 0.4 })
+    expect(clamped.status).toBe(200)
+    expect(clamped.body.end).toBe(Math.round(duration * 1000) / 1000)
+    expect((await api<Highlight>(base, 'PATCH', `/api/highlights/${early.body.id}`, { end: 1.75 })).body.end).toBe(1.75)
     expect((await api(base, 'PATCH', `/api/highlights/${early.body.id}`, { end: duration + 1 })).status).toBe(422)
     expect((await api(base, 'PATCH', `/api/highlights/${early.body.id}`, { start: 1.6 })).body.statusMessage).toBe('精華片段至少要 0.5 秒')
     expect((await api(base, 'PATCH', `/api/highlights/${early.body.id}`, {})).status).toBe(400)

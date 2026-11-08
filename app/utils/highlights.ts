@@ -1,10 +1,18 @@
 // Highlight helpers: ordering, filtering, range validation.
-import { MAX_SHORTS_SECONDS, type Highlight, type HighlightStatus } from '../../shared/types/domain'
-import { formatTime } from './time'
+import { MAX_SHORTS_SECONDS, type Highlight, type HighlightOrigin, type HighlightStatus } from '../../shared/types/domain'
+import { formatTimeInput } from './time'
 
 export type HighlightFilter = 'all' | HighlightStatus
 
 export const MIN_HIGHLIGHT_SECONDS = 0.5
+
+/**
+ * How far past the video length an end time may be typed. The length is shown rounded (to 0.1 s,
+ * to whole seconds past an hour, or as a whole-second duration in the header), so the value the
+ * user sees can be up to 0.5 s above the real one. The server accepts the same slack and clamps
+ * such an end to the length.
+ */
+export const END_SLACK_SECONDS = 0.5
 
 export function sortHighlights<T extends Pick<Highlight, 'start' | 'end'>>(list: readonly T[]): T[] {
   return list.slice().sort((a, b) => a.start - b.start || a.end - b.end)
@@ -31,10 +39,13 @@ export function validateHighlightRange(start: number | null, end: number | null,
   if (start === null) return '請輸入起點，例如 1:23.4'
   if (end === null) return '請輸入終點，例如 1:45.0'
   if (start < 0) return '起點不可小於 0'
-  if (duration > 0 && start >= duration) return `起點超過影片長度（${formatTime(duration)}）`
-  if (duration > 0 && end > duration + 0.001) return `終點超過影片長度（${formatTime(duration)}）`
-  if (end <= start) return '終點必須晚於起點'
-  if (end - start < MIN_HIGHLIGHT_SECONDS) return `精華片段至少要 ${MIN_HIGHLIGHT_SECONDS} 秒`
+  // Messages name the length rounded down, so the value they show is itself accepted.
+  const shownLength = formatTimeInput(Math.floor(duration * 10) / 10)
+  if (duration > 0 && start >= duration) return `起點超過影片長度（${shownLength}）`
+  if (duration > 0 && end > duration + END_SLACK_SECONDS) return `終點超過影片長度（${shownLength}）`
+  const clampedEnd = duration > 0 ? Math.min(end, duration) : end
+  if (clampedEnd <= start) return '終點必須晚於起點'
+  if (clampedEnd - start < MIN_HIGHLIGHT_SECONDS) return `精華片段至少要 ${MIN_HIGHLIGHT_SECONDS} 秒`
   return null
 }
 
@@ -44,13 +55,15 @@ export function isOverShortsLimit(start: number, end: number): boolean {
 
 export const SHORTS_WARNING = '超過 3 分鐘，可能無法上傳成 Shorts／Reels'
 
-/** Status buttons offered for a Highlight, in display order. */
-export function statusTransitions(status: HighlightStatus): HighlightStatus[] {
-  switch (status) {
-    case 'candidate': return ['selected', 'dismissed']
-    case 'selected': return ['dismissed', 'candidate']
-    case 'dismissed': return ['selected', 'candidate']
-  }
+/**
+ * Status buttons offered for a Highlight, in display order. A manual Highlight was never a
+ * Candidate (only the analysis makes those), so it only switches between 選用 and 捨棄.
+ */
+export function statusTransitions(status: HighlightStatus, origin: HighlightOrigin = 'analysis'): HighlightStatus[] {
+  const all: HighlightStatus[] = status === 'candidate'
+    ? ['selected', 'dismissed']
+    : status === 'selected' ? ['dismissed', 'candidate'] : ['selected', 'candidate']
+  return origin === 'manual' ? all.filter(s => s !== 'candidate') : all
 }
 
 export const statusActionLabels: Record<HighlightStatus, string> = {

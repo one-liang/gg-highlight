@@ -19,8 +19,9 @@
 ### 加入影片
 
 - **影片資料夾**：設定頁指定一或多個資料夾（例如 OBS 錄影資料夾），系統列出其中的影片檔（不遞迴），挑選後直接引用原檔，不複製。
-- **拖拉上傳**：檔案串流寫入 `data/uploads/`（會佔一份空間）。上傳後先 probe，再選語言與音軌。
+- **拖拉上傳**：在「加入影片」的「上傳檔案」分頁選擇或拖入檔案，串流寫入 `data/uploads/`（會佔一份空間）。上傳後先 probe，再選語言與音軌。拖到頁面其他地方的檔案一律忽略（不會讓瀏覽器打開檔案而離開 app、中斷上傳）。
 - 加入時選 **語言**（`zh` 中文含中英夾雜／`en` 英文）與 **分析用音軌**（預設 0）。系統用 ffprobe 列出音軌讓使用者選。
+- 加入時就 probe 一次並存下影片資訊（長度、解析度、音軌），所以影片頁在分析完成前就能顯示長度；讀不到影片或選的音軌不存在 → 422，不會加入。分析的 `probe` 步驟會再讀一次（檔案可能在排隊期間換過）。
 - 同一個檔案路徑不能重複加入影片庫。
 
 ### 分析（Analysis）
@@ -29,8 +30,8 @@
 - 每支原始影片只分析一次。失敗可以重試；程式中途被關掉，下次啟動時正在跑的分析從頭重跑。
 - 里程碑 1 的步驟與進度權重：`probe`（2%）→ `extract-audio`（8%）→ `transcribe`（75%）→ `prepare-preview`（15%）。
   - `extract-audio`：取「分析用音軌」轉成 16kHz 單聲道 WAV，放在 `data/videos/<id>/audio.wav`，分析結束後刪除。
-  - `transcribe`：中文用 Breeze-ASR-25（`SoybeanMilk/faster-whisper-Breeze-ASR-25`），英文用 Whisper large-v3-turbo（`deepdml/faster-whisper-large-v3-turbo-ct2`）。原始結果存 `data/videos/<id>/transcript.raw.json`，再切成字幕大小的逐字稿段落存進資料庫。中文一律經 OpenCC `cn → twp` 轉成台灣正體。
-  - `prepare-preview`：瀏覽器能直接播的檔案（mp4/mov + h264/av1/vp9 + aac/mp3/opus）不另外處理；只有容器不對（例如 OBS 的 mkv）就 remux 成 `data/videos/<id>/preview.mp4`；編碼也不支援才轉成 720p h264。預覽一律用音軌 0。
+  - `transcribe`：中文用 Breeze-ASR-25（`SoybeanMilk/faster-whisper-Breeze-ASR-25`），英文用 Whisper large-v3-turbo（`deepdml/faster-whisper-large-v3-turbo-ct2`）。原始結果存 `data/videos/<id>/transcript.raw.json`，再切成字幕大小的逐字稿段落存進資料庫。中文一律經 OpenCC `cn → twp` 轉成台灣正體；OpenCC 會寫成正式的「臺」（台灣 → 臺灣），再換回台灣日常用的「台」。
+  - `prepare-preview`：瀏覽器能直接播的檔案（mp4/mov + h264/av1/vp9 + aac/mp3/opus）不另外處理；只有容器不對（例如 OBS 的 mkv）就 remux 成 `data/videos/<id>/preview.mp4`；編碼也不支援才轉成 720p h264（能用 NVENC 就用，NVENC 執行時失敗就用 libx264 重轉一次，見「輸出剪輯」）。預覽一律用音軌 0。
 
 ### 音軌規則
 
@@ -48,6 +49,7 @@
 - 狀態：`candidate`（候選）／`selected`（選用）／`dismissed`（捨棄）。
 - 來源：`analysis`（里程碑 2 起由分析產生）／`manual`（使用者手動新增，一開始就是選用）。
 - 使用者可以調整起訖點、切換狀態；手動片段不限長度，超過 180 秒顯示「可能無法上傳成 Shorts/Reels」提醒。
+- 畫面上的影片長度是四捨五入過的（0.1 秒，超過一小時或標題列為整秒），可能比實際長度多到 0.5 秒；所以終點可以超過影片長度 0.5 秒以內，存成影片長度。錯誤訊息裡的長度一律無條件捨去，訊息寫的值本身一定可以用。
 - （里程碑 2）分析產生的候選：長度 15–60 秒、對齊句子邊界且前後各留約 1 秒、重疊的合併、依精華分數排序、每小時影片最多約 10 個、缺少的訊號不扣分。
 
 ### 輸出剪輯
@@ -58,7 +60,12 @@
   - `center-crop`：1080×1920，從原畫面中央裁出 9:16 再縮放。
   - `original`：維持原比例與解析度，最高 1080p（寬高取偶數）。
 - 影格率維持原樣；能用 NVENC 就用 `h264_nvenc`，否則 `libx264`；音訊為音軌 0 轉 AAC；`+faststart`。
+- NVENC 在啟動時的測試編碼通過，執行時仍可能失敗（例如 OBS 正在用 NVENC 錄影、佔滿編碼工作階段）：`h264_nvenc` 的 ffmpeg 失敗且不是被中止的，就自動用 `libx264` 重做一次並寫進 log；`libx264` 也失敗才算輸出失敗（顯示 `libx264` 的錯誤）。
 - 字幕：ASS 檔燒錄，字型 Noto Sans CJK TC（`fonts/` 資料夾），大字、白字黑邊、置中偏下、最多兩行。同時一定輸出對應的 `.srt`（時間以剪輯開頭為 0）。
+  - libass 把 ASS 的 Fontsize 當成字型的 ascender + descender，Noto Sans CJK 約 1.45 em：Fontsize 100 畫出的中文字約 69 px 寬。每行能放幾個字依這個實際字寬算：`floor((寬 − 2 × 左右邊界) ÷ (Fontsize ÷ 1.45))`。
+  - 直式版型（1080×1920）：Fontsize 100、黑邊 6、左右邊界 60、下邊界 440（剛好在模糊背景中間那條 16:9 畫面下方）；一行 13 個中文字，兩行 26 字，等於逐字稿段落的上限。
+  - 原比例版型：Fontsize = 短邊 × 7.5%（1080p 為 81）、黑邊 = Fontsize ÷ 14（至少 2）、左右邊界 = 寬 × 5%、下邊界 = 高 × 6%。
+  - 段落被使用者改得太長（最多 200 字），或是英文大寫這類比字數估計更寬的文字，兩行放不下時，依字型實際字寬縮小那一句的字級（ASS `\fs`），讓字幕留在左右邊界內，不會超出畫面。
 - 輸出排隊、一次一支，和分析的佇列互相獨立。
 
 ### 從影片庫移除
@@ -92,6 +99,14 @@ tests/                   測試素材產生器、整合測試、e2e
 
 `server/lib/**` 一律用明確的 `import`（不依賴 Nitro auto-import），才能直接用 Vitest 測試。
 
+### 啟動（`scripts/start.mjs`，`start.bat` 呼叫）
+
+1. 連接埠已經有 gg-highlight 在跑：只打開瀏覽器。
+2. `node_modules` 不存在，或 `package.json`／`pnpm-lock.yaml` 的內容和上次安裝時不同（`node_modules/.gg-install-stamp`，比內容不比修改時間）：先 `pnpm install`。setup.bat 裝好之後第一次啟動也會確認一次。
+3. `app/`、`server/`、`shared/` 或設定檔變了（`.output/.gg-build-stamp`）：`pnpm build`。
+4. 用 `HOST`／`PORT`（預設 `127.0.0.1:3939`）與 `NITRO_SHUTDOWN_TIMEOUT=3000` 啟動伺服器，準備好後打開瀏覽器。
+5. Ctrl+C 或關閉視窗：伺服器最多約 6 秒內關閉（等回應 3 秒＋`close` hook 3 秒）；15 秒還沒結束才強制結束。
+
 ### 資料夾 `data/`
 
 ```
@@ -113,11 +128,26 @@ data/downloads/<videoId>.<ext> YouTube 下載（里程碑 3）
 | `GG_ASR_MODEL_ZH` / `GG_ASR_MODEL_EN` | Breeze / large-v3-turbo | 模型（測試用 `Systran/faster-whisper-tiny`） |
 | `GG_ASR_DEVICE` | `auto` | `auto`／`cuda`／`cpu` |
 | `GG_VIDEO_ENCODER` | 自動偵測 | 強制 `h264_nvenc` 或 `libx264` |
-| `HOST` / `PORT` | `127.0.0.1` / `3939` | Nitro 監聽位址 |
+| `HOST` / `PORT` | `127.0.0.1` / `3939` | Nitro 監聽位址。預設值由伺服器自己套用（`server/plugins/startup.ts`），直接執行 `node .output/server/index.mjs` 也只接受本機連線，不會用 Nitro 的 `0.0.0.0:3000` |
+| `NITRO_SHUTDOWN_TIMEOUT` | `3000`（`start.mjs` 設定） | 關閉時等待未完成回應（例如播放中的影片串流）的毫秒數，之後強制關閉連線並執行 `close` hook（中止工作、結束 ffmpeg／轉錄程式） |
 
 ### API
 
 所有回應都是 JSON（檔案下載除外），型別見 `shared/types/domain.ts`。錯誤用 h3 `createError({ statusCode, statusMessage })`，`statusMessage` 是給使用者看的繁中訊息。
+
+錯誤狀態碼：
+
+| 狀態碼 | 用在 |
+| --- | --- |
+| 400 | 請求格式不對：不是 JSON、欄位型別或必填欄位錯、逐字稿文字空白或超過 200 字、缺少 `X-File-Name` |
+| 403 | 路徑不在設定的影片資料夾內（`POST /api/videos`、`POST /api/probe`） |
+| 404 | 找不到影片／精華片段／剪輯／檔案，或沒有這個 API |
+| 405 | 這個 API 路徑不支援這個方法（回應帶 `Allow`；`HEAD` 視同沒有本文的 `GET`） |
+| 409 | 狀態不允許：同一路徑重複加入、只有 `failed` 可以重試、分析完成前不能輸出、影片資訊還沒讀取完成 |
+| 415 | 上傳的副檔名不是影片 |
+| 422 | 內容不合理：精華片段範圍不對、讀不到影片檔、分析用音軌不存在、原始影片檔不見了無法輸出 |
+
+任何沒有 route 處理的 `/api/**` 請求（包括已知路徑配上錯的方法）都回 JSON 404／405，不會落到 SPA 頁面。
 
 | 方法與路徑 | 內容 |
 | --- | --- |
@@ -146,7 +176,7 @@ data/downloads/<videoId>.<ext> YouTube 下載（里程碑 3）
 
 ### 驗證輸入
 
-- 精華片段：`0 <= start < end <= 影片長度`，長度至少 0.5 秒。
+- 精華片段：`0 <= start < end <= 影片長度`，長度至少 0.5 秒；終點超過影片長度 0.5 秒以內時存成影片長度（見「精華片段」）。
 - 逐字稿文字：去頭尾空白後不可為空，最多 200 字。
 - 版型必須是三種之一。
 

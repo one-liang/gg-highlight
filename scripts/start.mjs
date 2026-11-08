@@ -16,8 +16,17 @@ export const STAMP_DIRS = ['app', 'server', 'shared']
 export const STAMP_FILES = ['nuxt.config.ts', 'package.json', 'pnpm-lock.yaml']
 export const STAMP_FILE = path.join('.output', '.gg-build-stamp')
 export const SERVER_ENTRY = path.join('.output', 'server', 'index.mjs')
+/** Files whose contents decide whether `pnpm install` must run again. */
+export const INSTALL_STAMP_FILES = ['package.json', 'pnpm-lock.yaml']
+export const INSTALL_STAMP_FILE = path.join('node_modules', '.gg-install-stamp')
 export const DEFAULT_HOST = '127.0.0.1'
 export const DEFAULT_PORT = 3939
+/**
+ * How long Nitro waits for open responses on shutdown before it destroys them and runs its 'close'
+ * hook (stop the queues, kill ffmpeg / the transcriber). A <video> keeps a media response open, and
+ * Nitro's own default (30 s) is longer than FORCE_KILL_MS.
+ */
+export const SHUTDOWN_TIMEOUT_MS = 3000
 const READY_TIMEOUT_MS = 60_000
 const FORCE_KILL_MS = 15_000
 
@@ -92,6 +101,55 @@ export async function buildStatus(root, stamp) {
   return { needed: false, reason: null }
 }
 
+/** Hash of the contents of package.json and pnpm-lock.yaml (not their mtimes: a git checkout or an unzip changes those). */
+export async function computeInstallStamp(root) {
+  const hash = createHash('sha256')
+  for (const rel of INSTALL_STAMP_FILES) {
+    let content
+    try {
+      content = await fsp.readFile(path.join(root, rel))
+    }
+    catch {
+      hash.update(`${rel}\tmissing\n`)
+      continue
+    }
+    hash.update(`${rel}\t${content.length}\n`)
+    hash.update(content)
+  }
+  return hash.digest('hex')
+}
+
+export async function readInstallStamp(root) {
+  try {
+    return (await fsp.readFile(path.join(root, INSTALL_STAMP_FILE), 'utf8')).trim()
+  }
+  catch {
+    return null
+  }
+}
+
+export async function writeInstallStamp(root, stamp) {
+  await fsp.writeFile(path.join(root, INSTALL_STAMP_FILE), `${stamp}\n`)
+}
+
+/**
+ * Whether `pnpm install` must run: no node_modules yet ('missing'), installed by something else
+ * such as setup.bat ('unknown'), or package.json / the lockfile changed since ('changed').
+ */
+export async function installStatus(root, stamp) {
+  if (!fs.existsSync(path.join(root, 'node_modules'))) return { needed: true, reason: 'missing' }
+  const current = await readInstallStamp(root)
+  if (current === null) return { needed: true, reason: 'unknown' }
+  if (current !== stamp) return { needed: true, reason: 'changed' }
+  return { needed: false, reason: null }
+}
+
+const INSTALL_MESSAGES = {
+  missing: '▶ 第一次啟動：安裝套件（pnpm install），需要幾分鐘…',
+  unknown: '▶ 確認套件是否齊全（pnpm install）…',
+  changed: '▶ 套件有更新，安裝套件（pnpm install）…',
+}
+
 /** HOST / PORT from the environment, validated so they are safe to put in a URL and a shell command. */
 export function listenAddress(env = process.env) {
   const host = (env.HOST || DEFAULT_HOST).trim()
@@ -110,13 +168,19 @@ export function urlHost(host) {
   return host.includes(':') ? `[${host}]` : host
 }
 
-/** Environment for the Nitro server: HOST/PORT defaults and a quiet node:sqlite. */
+/** Environment for the Nitro server: HOST/PORT defaults, a short shutdown timeout and a quiet node:sqlite. */
 export function serverEnv(env = process.env) {
   const { host, port } = listenAddress(env)
   const flag = '--disable-warning=ExperimentalWarning'
   const current = (env.NODE_OPTIONS ?? '').trim()
   const nodeOptions = current.split(/\s+/).includes(flag) ? current : [current, flag].filter(Boolean).join(' ')
-  return { ...env, HOST: host, PORT: String(port), NODE_OPTIONS: nodeOptions }
+  return {
+    ...env,
+    HOST: host,
+    PORT: String(port),
+    NITRO_SHUTDOWN_TIMEOUT: env.NITRO_SHUTDOWN_TIMEOUT || String(SHUTDOWN_TIMEOUT_MS),
+    NODE_OPTIONS: nodeOptions,
+  }
 }
 
 /** True when something accepts TCP connections on host:port. */
@@ -259,13 +323,17 @@ export async function main({
     return 0
   }
 
-  if (!fs.existsSync(path.join(root, 'node_modules'))) {
-    log('▶ 第一次啟動：安裝套件（pnpm install），需要幾分鐘…')
+  // After an update (git pull, a new ZIP) the dependencies may have changed too: install before building.
+  const install = await installStatus(root, await computeInstallStamp(root))
+  if (install.needed) {
+    log(INSTALL_MESSAGES[install.reason])
     const code = await runInherited('pnpm', ['install'], { cwd: root, env, platform })
     if (code !== 0) {
       log('❌ 套件安裝失敗。請確認網路連線，或重新執行 setup.bat 後再試一次。')
       return code || 1
     }
+    // pnpm may have rewritten the lockfile: stamp what is there now.
+    await writeInstallStamp(root, await computeInstallStamp(root))
   }
 
   const stamp = await computeBuildStamp(root)

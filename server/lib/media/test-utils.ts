@@ -39,6 +39,43 @@ export async function installFont(dir: string): Promise<string> {
   return target
 }
 
+/** The fake ffmpeg below is a shell script, which Windows cannot spawn directly. */
+export const CAN_FAKE_FFMPEG = process.platform !== 'win32'
+
+/**
+ * Writes a fake ffmpeg into `dir` that fails like a busy NVENC (OBS holding the encode sessions)
+ * whenever its arguments ask for h264_nvenc, and runs the real ffmpeg otherwise. `calls` (a file)
+ * gets one line per run: the video encoder it was asked for, or "-".
+ */
+export async function writeFailingNvencFfmpeg(dir: string, realFfmpeg = tools.ffmpegPath): Promise<{ ffmpegPath: string, calls: string }> {
+  const ffmpegPath = path.join(dir, 'fake-ffmpeg.sh')
+  const calls = path.join(dir, 'fake-ffmpeg-calls.txt')
+  const quote = (s: string) => `'${s.replace(/'/g, '\'\\\'\'')}'`
+  await fs.writeFile(ffmpegPath, [
+    '#!/bin/sh',
+    'encoder=-',
+    'prev=',
+    'for arg in "$@"; do',
+    '  if [ "$prev" = "-c:v" ]; then encoder="$arg"; fi',
+    '  prev="$arg"',
+    'done',
+    `echo "$encoder" >> ${quote(calls)}`,
+    'if [ "$encoder" = "h264_nvenc" ]; then',
+    '  echo "[h264_nvenc @ 0x5581] OpenEncodeSessionEx failed: out of memory (10): (no details)" >&2',
+    '  echo "[vost#0:0/h264_nvenc @ 0x5581] Error while opening encoder" >&2',
+    '  exit 187',
+    'fi',
+    `exec ${quote(realFfmpeg)} "$@"`,
+    '',
+  ].join('\n'), { mode: 0o755 })
+  return { ffmpegPath, calls }
+}
+
+/** Encoders the fake ffmpeg was asked for, one per run. */
+export async function fakeFfmpegCalls(calls: string): Promise<string[]> {
+  return (await fs.readFile(calls, 'utf8').catch(() => '')).split('\n').filter(Boolean)
+}
+
 /** Windows forbids ':' in names and silently drops trailing spaces. */
 export function validDirName(name: string): boolean {
   return process.platform !== 'win32' || !/:|\s$/.test(name)

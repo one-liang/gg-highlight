@@ -45,12 +45,22 @@ export interface RunningServer {
   stop: () => Promise<number | null>
 }
 
-export async function startServer(env: Record<string, string>): Promise<RunningServer> {
+/**
+ * Runs the built server on a free port. `host: null` leaves HOST / NITRO_HOST unset, to see where the
+ * server listens on its own.
+ */
+export async function startServer(env: Record<string, string>, opts: { host?: string | null } = {}): Promise<RunningServer> {
   const port = await freePort()
   let output = ''
+  const host = opts.host === undefined ? '127.0.0.1' : opts.host
+  const childEnv: NodeJS.ProcessEnv = { ...process.env, ...env, PORT: String(port), NODE_ENV: 'production' }
+  delete childEnv.NITRO_HOST
+  delete childEnv.NITRO_PORT
+  if (host === null) delete childEnv.HOST
+  else childEnv.HOST = host
   const child = spawn(process.execPath, [path.join(ROOT_DIR, SERVER_ENTRY)], {
     cwd: ROOT_DIR,
-    env: { ...process.env, ...env, HOST: '127.0.0.1', PORT: String(port), NODE_ENV: 'production' },
+    env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   })

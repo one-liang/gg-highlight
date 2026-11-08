@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { SourceVideo } from '~~/shared/types/domain'
-import { analysisStepLabel, languageLabels } from '~/utils/labels'
+import { analysisStepLabel, languageLabels, MISSING_FILE_LABEL, showsMissingFileLine } from '~/utils/labels'
 import { formatDateTime, formatPercent, formatResolution, progressPercent } from '~/utils/format'
 import { formatDuration } from '~/utils/time'
 
@@ -54,9 +54,9 @@ const to = computed(() => `/videos/${encodeURIComponent(props.video.id)}`)
         {{ analysis.error || '分析失敗，請到影片頁重試。' }}
       </p>
 
-      <p v-if="video.fileMissing" class="mt-1.5 flex items-center gap-1 text-sm text-warning">
+      <p v-if="showsMissingFileLine(video)" class="mt-1.5 flex items-center gap-1 text-sm text-warning">
         <UIcon name="i-lucide-triangle-alert" class="size-4 shrink-0" />
-        找不到原始影片檔
+        {{ MISSING_FILE_LABEL }}
       </p>
     </div>
 
