@@ -98,7 +98,7 @@ export async function resolveUpload(config: AppConfig, uploadId: string): Promis
   return { filePath, fileName }
 }
 
-/** Deletes upload files no video points at and older than olderThanMs. Returns how many were removed. */
+/** Deletes upload files no video points at and older than olderThanMs (<= 0: any age). Returns how many were removed. */
 export async function cleanupOrphanUploads(config: AppConfig, referencedPaths: Set<string>, olderThanMs: number): Promise<number> {
   const dir = uploadsDir(config)
   let names: string[]
@@ -112,7 +112,9 @@ export async function cleanupOrphanUploads(config: AppConfig, referencedPaths: S
   const cutoff = Date.now() - olderThanMs
   const isOld = async (file: string) => {
     try {
-      return (await fs.stat(file)).mtimeMs <= cutoff
+      const { mtimeMs } = await fs.stat(file)
+      // Date.now() is whole milliseconds and mtimeMs is not: a file written this millisecond looks newer than "now"
+      return olderThanMs <= 0 || mtimeMs <= cutoff
     }
     catch {
       return false

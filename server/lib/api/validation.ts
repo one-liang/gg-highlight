@@ -1,7 +1,7 @@
 // Request validation (zod) with Chinese messages. Every failure becomes a 400.
 import { z } from 'zod'
 import type {
-  AddVideoBody, CreateClipBody, CreateHighlightBody, Settings, UpdateHighlightBody, UpdateSegmentBody,
+  AddVideoBody, CreateClipBody, CreateHighlightBody, ReanalyzeBody, Settings, UpdateHighlightBody, UpdateSegmentBody,
 } from '../../../shared/types/domain'
 import { badRequest } from './errors'
 
@@ -45,6 +45,10 @@ export const updateSegmentSchema = z.object({
 export const settingsSchema = z.object({
   watchFolders: z.array(z.string({ error: '資料夾路徑必須是文字' }), { error: '影片資料夾必須是清單' }).max(50, '影片資料夾最多 50 個'),
 }, { error: NOT_OBJECT }) satisfies z.ZodType<Settings, unknown>
+
+export const reanalyzeSchema = z.object({
+  mode: z.enum(['full', 'highlights'], { error: '重新分析的方式必須是 full（重新辨識語音並找精華）或 highlights（只重新找精華片段）' }),
+}, { error: NOT_OBJECT }) satisfies z.ZodType<ReanalyzeBody, unknown>
 
 export const probeSchema = z.object({
   filePath: z.string({ error: '請提供影片路徑' }).min(1, '請提供影片路徑'),

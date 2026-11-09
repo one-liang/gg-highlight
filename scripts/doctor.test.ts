@@ -1,9 +1,13 @@
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs/promises'
+import http from 'node:http'
+import type { AddressInfo } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { isOlderVersion, normalizeModelName } from '../server/lib/llm/ollama'
+import * as llmTypes from '../server/lib/llm/types'
 import {
   checkDataDir,
   checkFfmpeg,
@@ -12,13 +16,21 @@ import {
   checkNode,
   checkNvenc,
   checkNvidiaSmi,
+  checkOllama,
   checkPnpm,
   checkTranscriber,
   checkUv,
   createContext,
+  DEFAULT_OLLAMA_MODEL,
+  DEFAULT_OLLAMA_URL,
   exitCodeFor,
   formatReport,
   hasLibass,
+  MIN_OLLAMA_VERSION,
+  normalizeOllamaModel,
+  ollamaConfig,
+  ollamaHasModel,
+  ollamaVersionTooOld,
   parseFfmpegVersion,
   parseNvidiaSmi,
   parseTranscriberCheck,
@@ -65,6 +77,11 @@ afterEach(async () => {
   await fs.rm(tmp, { recursive: true, force: true })
 })
 
+/** No Ollama answers: like a closed port. */
+const unreachableFetch = async () => {
+  throw new TypeError('fetch failed')
+}
+
 function ctx(overrides: Record<string, unknown> = {}) {
   return createContext({
     env: {},
@@ -72,9 +89,55 @@ function ctx(overrides: Record<string, unknown> = {}) {
     fontsDir: path.join(tmp, 'fonts'),
     dataDir: path.join(tmp, 'data'),
     run: fakeRun({}),
+    fetch: unreachableFetch,
     hasSqlite: async () => true,
     ...overrides,
   })
+}
+
+interface FakeOllamaOptions {
+  /** Body of GET /api/version; null → 404. */
+  version?: unknown
+  /** Model names in GET /api/tags; null → 500. */
+  models?: string[] | null
+  /** Never answer (to test the timeout). */
+  hang?: boolean
+}
+
+/** Tiny stand-in for Ollama's GET /api/version and /api/tags. */
+async function startFakeOllama(opts: FakeOllamaOptions = {}) {
+  const requests: string[] = []
+  const server = http.createServer((req, res) => {
+    requests.push(`${req.method} ${req.url}`)
+    if (opts.hang) return
+    const send = (status: number, body: unknown) => {
+      res.writeHead(status, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(body))
+    }
+    if (req.url === '/api/version' && opts.version !== null) {
+      send(200, opts.version ?? { version: '0.40.15' })
+    }
+    else if (req.url === '/api/tags' && opts.models !== null) {
+      const models = (opts.models ?? ['qwen3.5:9b']).map(name => ({ name, model: name, size: 6_600_000_000 }))
+      send(200, { models })
+    }
+    else if (req.url === '/api/tags') {
+      send(500, { error: 'boom' })
+    }
+    else {
+      send(404, { error: 'not found' })
+    }
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address() as AddressInfo
+  return {
+    url: `http://127.0.0.1:${port}`,
+    requests,
+    close: () => new Promise<void>((resolve) => {
+      server.closeAllConnections()
+      server.close(() => resolve())
+    }),
+  }
 }
 
 describe('parsing', () => {
@@ -332,12 +395,141 @@ describe('checkNvidiaSmi', () => {
   })
 })
 
+describe('Ollama settings', () => {
+  it('keeps the defaults in sync with server/lib/llm/types.ts', () => {
+    expect(DEFAULT_OLLAMA_URL).toBe(llmTypes.DEFAULT_OLLAMA_URL)
+    expect(DEFAULT_OLLAMA_MODEL).toBe(llmTypes.DEFAULT_OLLAMA_MODEL)
+    expect(MIN_OLLAMA_VERSION).toBe(llmTypes.MIN_OLLAMA_VERSION)
+  })
+
+  it('reads GG_OLLAMA_URL / GG_OLLAMA_MODEL with defaults and off', () => {
+    expect(ollamaConfig({})).toEqual({ url: 'http://127.0.0.1:11434', model: 'qwen3.5:9b' })
+    expect(ollamaConfig({ GG_OLLAMA_URL: '  ', GG_OLLAMA_MODEL: '' })).toEqual({ url: 'http://127.0.0.1:11434', model: 'qwen3.5:9b' })
+    expect(ollamaConfig({ GG_OLLAMA_URL: 'off' }).url).toBeNull()
+    expect(ollamaConfig({ GG_OLLAMA_URL: 'OFF' }).url).toBeNull()
+    expect(ollamaConfig({ GG_OLLAMA_URL: 'http://192.168.1.5:11434/', GG_OLLAMA_MODEL: ' qwen3.5:4b ' }))
+      .toEqual({ url: 'http://192.168.1.5:11434', model: 'qwen3.5:4b' })
+  })
+
+  it('matches model names and versions the same way as the server', () => {
+    for (const name of ['qwen3.5:9b', 'Qwen3', 'qwen3:latest', 'library/qwen3', 'host:5000/me/model', 'me/model:q4']) {
+      expect(normalizeOllamaModel(name), name).toBe(normalizeModelName(name))
+    }
+    for (const version of ['0.31.2', '0.31.1', '0.30.9', '0.40.15', 'v0.31.2', '0.31.2-rc1', '1.0', '0.9.0', 'garbage', '']) {
+      expect(ollamaVersionTooOld(version), version).toBe(isOlderVersion(version, MIN_OLLAMA_VERSION))
+    }
+  })
+
+  it('finds the model in /api/tags by name or model, with the :latest default', () => {
+    expect(ollamaHasModel({ models: [{ name: 'qwen3.5:9b' }] }, 'qwen3.5:9b')).toBe(true)
+    expect(ollamaHasModel({ models: [{ model: 'qwen3:latest' }] }, 'qwen3')).toBe(true)
+    expect(ollamaHasModel({ models: [{ name: 'qwen3.5:4b' }] }, 'qwen3.5:9b')).toBe(false)
+    expect(ollamaHasModel({ models: [] }, 'qwen3.5:9b')).toBe(false)
+    expect(ollamaHasModel({}, 'qwen3.5:9b')).toBe(false)
+  })
+})
+
+describe('checkOllama', () => {
+  const servers: Array<{ close: () => Promise<void> }> = []
+  afterEach(async () => {
+    await Promise.all(servers.splice(0).map(s => s.close()))
+  })
+  async function fake(opts: FakeOllamaOptions = {}) {
+    const server = await startFakeOllama(opts)
+    servers.push(server)
+    return server
+  }
+  const realFetch = (input: string | URL | Request, init?: RequestInit) => globalThis.fetch(input, init)
+  const withServer = (url: string, env: Record<string, string> = {}, extra: Record<string, unknown> = {}) =>
+    ctx({ env: { GG_OLLAMA_URL: url, ...env }, fetch: realFetch, ...extra })
+
+  it('passes with a recent Ollama that has the model', async () => {
+    const ollama = await fake()
+    const r = await checkOllama(withServer(ollama.url))
+    expect(r).toMatchObject({ id: 'ollama', status: 'ok', required: false, detail: 'Ollama 0.40.15，模型 qwen3.5:9b', fix: null })
+    expect(ollama.requests).toEqual(['GET /api/version', 'GET /api/tags'])
+  })
+
+  it('honours GG_OLLAMA_MODEL and the :latest default tag', async () => {
+    const ollama = await fake({ models: ['qwen3:latest'] })
+    expect((await checkOllama(withServer(ollama.url, { GG_OLLAMA_MODEL: 'qwen3' }))).status).toBe('ok')
+    expect(await checkOllama(withServer(ollama.url))).toMatchObject({ status: 'warn', detail: 'Ollama 0.40.15，還沒有 qwen3.5:9b 模型' })
+  })
+
+  it('warns with the pull command when the model is missing', async () => {
+    const ollama = await fake({ models: ['llama3.2:3b'] })
+    const r = await checkOllama(withServer(ollama.url))
+    expect(r).toMatchObject({ status: 'warn', required: false })
+    expect(r.fix).toContain('ollama pull qwen3.5:9b（約 6.6 GB）')
+    expect(r.fix).toMatch(/自動找精華只會用音量/)
+    const custom = await checkOllama(withServer(ollama.url, { GG_OLLAMA_MODEL: 'qwen3.5:4b' }))
+    expect(custom.fix).toContain('ollama pull qwen3.5:4b，')
+  })
+
+  it('warns that an Ollama older than 0.31.2 must be updated', async () => {
+    const ollama = await fake({ version: { version: '0.31.1' } })
+    const r = await checkOllama(withServer(ollama.url))
+    expect(r).toMatchObject({ status: 'warn', detail: 'Ollama 0.31.1，需要 0.31.2 以上' })
+    expect(r.fix).toMatch(/更新 Ollama/)
+    expect(r.fix).toContain('winget upgrade --id Ollama.Ollama')
+    expect(ollama.requests).toEqual(['GET /api/version'])
+  })
+
+  it('treats a server without a version as unreachable, and a broken tag list as a warning', async () => {
+    const notOllama = await fake({ version: { hello: 'world' } })
+    expect((await checkOllama(withServer(notOllama.url))).detail).toBe(`連不到 Ollama（${notOllama.url}）`)
+    const brokenTags = await fake({ models: null })
+    expect((await checkOllama(withServer(brokenTags.url))).detail).toMatch(/讀不到模型清單/)
+  })
+
+  it('warns when nothing listens at a custom GG_OLLAMA_URL', async () => {
+    const closed = await startFakeOllama()
+    await closed.close()
+    const calls: Call[] = []
+    const r = await checkOllama(withServer(closed.url, {}, { run: fakeRun({}, calls) }))
+    expect(r).toMatchObject({ status: 'warn', required: false, detail: `連不到 Ollama（${closed.url}）` })
+    expect(r.fix).toMatch(/GG_OLLAMA_URL/)
+    expect(calls).toEqual([])
+    expect(exitCodeFor([r])).toBe(0)
+  })
+
+  it('tells apart a missing and a stopped Ollama at the default address', async () => {
+    const missingOllama = await checkOllama(ctx())
+    expect(missingOllama).toMatchObject({ status: 'warn', detail: '找不到 Ollama' })
+    expect(missingOllama.fix).toMatch(/setup\.bat/)
+    const stopped = await checkOllama(ctx({ run: fakeRun({ 'ollama --version': ok('Warning: could not connect to a running Ollama instance\nWarning: client version is 0.40.15\n') }) }))
+    expect(stopped).toMatchObject({ status: 'warn', detail: '連不到 Ollama（http://127.0.0.1:11434）' })
+    expect(stopped.fix).toMatch(/^啟動 Ollama/)
+  })
+
+  it('gives up quickly when Ollama does not answer', async () => {
+    const ollama = await fake({ hang: true })
+    const started = Date.now()
+    const r = await checkOllama(withServer(ollama.url, {}, { ollamaTimeoutMs: 200 }))
+    expect(r.status).toBe('warn')
+    expect(Date.now() - started).toBeLessThan(5000)
+  })
+
+  it('reports GG_OLLAMA_URL=off as switched off, without a request', async () => {
+    const calls: unknown[] = []
+    const r = await checkOllama(ctx({ env: { GG_OLLAMA_URL: 'off' }, fetch: async (...args: unknown[]) => { calls.push(args); throw new Error('no') } }))
+    expect(r).toMatchObject({ status: 'later', required: false, fix: null })
+    expect(r.detail).toMatch(/^已關閉/)
+    expect(calls).toEqual([])
+  })
+
+  it('rejects a GG_OLLAMA_URL that is not a URL', async () => {
+    const r = await checkOllama(ctx({ env: { GG_OLLAMA_URL: '127.0.0.1:11434 x' } }))
+    expect(r).toMatchObject({ status: 'warn', detail: 'GG_OLLAMA_URL 格式不正確：127.0.0.1:11434 x' })
+  })
+})
+
 describe('checkLaterTools', () => {
-  it('lists Ollama and Deno as not needed yet', async () => {
+  it('lists Deno as not needed yet', async () => {
     const results = await checkLaterTools(ctx({ run: fakeRun({ deno: ok('deno 2.5.0 (stable)\nv8 13\ntypescript 5.9\n') }) }))
-    expect(results.map(r => [r.id, r.status, r.required])).toEqual([['ollama', 'later', false], ['deno', 'later', false]])
-    expect(results[0].detail).toMatch(/尚未需要/)
-    expect(results[1].detail).toMatch(/已安裝/)
+    expect(results.map(r => [r.id, r.status, r.required])).toEqual([['deno', 'later', false]])
+    expect(results[0].detail).toMatch(/尚未需要（里程碑 3/)
+    expect(results[0].detail).toMatch(/已安裝/)
   })
 })
 
@@ -362,8 +554,9 @@ describe('runChecks / report', () => {
     const report = formatReport(results)
     expect(report).toMatch(/✅ Node\.js：v/)
     expect(report).toMatch(/⚠️ NVENC 硬體編碼/)
-    expect(report).toMatch(/➖ Ollama：尚未需要/)
-    expect(report).toMatch(/必要項目都通過了/)
+    expect(report).toMatch(/⚠️ Ollama（自動找精華）：找不到 Ollama/)
+    expect(report).toMatch(/➖ Deno：尚未需要/)
+    expect(report).toMatch(/必要項目都通過了（另有 \d+ 個提醒）/)
   })
 
   it('exits 1 and explains when a required item fails', async () => {
@@ -390,6 +583,7 @@ describe('CLI', () => {
         GG_TRANSCRIBER_CMD: JSON.stringify([process.execPath, fake]),
         GG_DATA_DIR: path.join(tmp, 'data'),
         GG_FONTS_DIR: path.join(tmp, 'fonts'),
+        GG_OLLAMA_URL: 'off',
       },
     })
     const parsed = JSON.parse(r.stdout)
@@ -399,6 +593,7 @@ describe('CLI', () => {
     expect(byId.fonts.status).toBe('fail')
     expect(byId.transcriber).toMatchObject({ status: 'warn', detail: expect.stringMatching(/CUDA 裝置 0 個/) })
     expect(byId.data.status).toBe('ok')
+    expect(byId.ollama).toMatchObject({ status: 'later', detail: expect.stringMatching(/^已關閉/) })
     expect(r.stderr).not.toMatch(/ExperimentalWarning/)
   })
 })

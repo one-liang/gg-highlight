@@ -13,16 +13,49 @@ import { runCommand } from '../../scripts/lib/common.mjs'
 export const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 export const FAKE_TRANSCRIBER = path.join(ROOT_DIR, 'server', 'lib', 'jobs', 'test-helpers', 'fake-transcriber.mjs')
 
+/** Test files run in parallel workers: only one of them builds, the others wait for it (a lock folder). */
+const BUILD_LOCK = path.join(ROOT_DIR, 'node_modules', '.gg-test-build-lock')
+const STALE_LOCK_MS = 15 * 60_000
+
+function tryLock(): boolean {
+  try {
+    fs.mkdirSync(BUILD_LOCK)
+    return true
+  }
+  catch {
+    try {
+      // A lock left by a killed test run.
+      if (Date.now() - fs.statSync(BUILD_LOCK).mtimeMs > STALE_LOCK_MS) fs.rmSync(BUILD_LOCK, { recursive: true, force: true })
+    }
+    catch {
+      // gone meanwhile
+    }
+    return false
+  }
+}
+
 /** Runs `pnpm build` unless .output matches the current sources (same stamp as scripts/start.mjs). */
 export async function ensureBuild(): Promise<void> {
-  const stamp = await computeBuildStamp(ROOT_DIR) as string
-  const status = await buildStatus(ROOT_DIR, stamp) as { needed: boolean }
-  if (!status.needed) return
-  const result = await runCommand('pnpm', ['build'], { cwd: ROOT_DIR }) as { ok: boolean, stdout: string, stderr: string, error?: string }
-  if (!result.ok || !fs.existsSync(path.join(ROOT_DIR, SERVER_ENTRY))) {
-    throw new Error(`pnpm build failed:\n${result.error ?? ''}\n${result.stdout.slice(-3000)}\n${result.stderr.slice(-3000)}`)
+  for (;;) {
+    const stamp = await computeBuildStamp(ROOT_DIR) as string
+    const status = await buildStatus(ROOT_DIR, stamp) as { needed: boolean }
+    if (!status.needed) return
+    if (!tryLock()) {
+      await new Promise(resolve => setTimeout(resolve, 1000))
+      continue
+    }
+    try {
+      const result = await runCommand('pnpm', ['build'], { cwd: ROOT_DIR }) as { ok: boolean, stdout: string, stderr: string, error?: string }
+      if (!result.ok || !fs.existsSync(path.join(ROOT_DIR, SERVER_ENTRY))) {
+        throw new Error(`pnpm build failed:\n${result.error ?? ''}\n${result.stdout.slice(-3000)}\n${result.stderr.slice(-3000)}`)
+      }
+      await writeBuildStamp(ROOT_DIR, stamp)
+      return
+    }
+    finally {
+      fs.rmSync(BUILD_LOCK, { recursive: true, force: true })
+    }
   }
-  await writeBuildStamp(ROOT_DIR, stamp)
 }
 
 export function freePort(): Promise<number> {
@@ -47,13 +80,14 @@ export interface RunningServer {
 
 /**
  * Runs the built server on a free port. `host: null` leaves HOST / NITRO_HOST unset, to see where the
- * server listens on its own.
+ * server listens on its own. GG_OLLAMA_URL is 'off' unless `env` sets it (e.g. to a fake Ollama), so
+ * a developer's real Ollama is never used.
  */
 export async function startServer(env: Record<string, string>, opts: { host?: string | null } = {}): Promise<RunningServer> {
   const port = await freePort()
   let output = ''
   const host = opts.host === undefined ? '127.0.0.1' : opts.host
-  const childEnv: NodeJS.ProcessEnv = { ...process.env, ...env, PORT: String(port), NODE_ENV: 'production' }
+  const childEnv: NodeJS.ProcessEnv = { ...process.env, GG_OLLAMA_URL: 'off', ...env, PORT: String(port), NODE_ENV: 'production' }
   delete childEnv.NITRO_HOST
   delete childEnv.NITRO_PORT
   if (host === null) delete childEnv.HOST

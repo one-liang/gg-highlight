@@ -1,7 +1,10 @@
 // Fake gg-transcribe for job and API tests. Speaks the JSON-lines protocol and writes a small
 // RawTranscript that matches the sample fixtures.
 //
-//   node fake-transcriber.mjs [--scenario=ok|slow|fail] transcribe --audio a.wav --language en --model m --device cpu --out t.json
+//   node fake-transcriber.mjs [--scenario=ok|slow|fail|loop] transcribe --audio a.wav --language en --model m --device cpu --out t.json
+//
+// Scenarios: ok (the segments below), slow (hangs after the first progress event), fail,
+// loop (zh: the reported ASR repetition loop, 快 × 78 on one collapsed timestamp, for the cleanup).
 //
 // Environment:
 //   GG_FAKE_FAIL_FILE    when this file exists, `transcribe` fails (lets API tests produce a failed Analysis)
@@ -31,6 +34,9 @@ const delay = Number(process.env.GG_FAKE_DELAY_MS ?? 20)
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 const emit = event => process.stdout.write(`${JSON.stringify(event)}\n`)
 
+/** Per-segment confidence fields the real transcriber exports (protocol.ts). */
+const CONFIDENT = { avgLogprob: -0.25, noSpeechProb: 0.02, compressionRatio: 1.1 }
+
 function words(start, end, text, sep) {
   const parts = sep ? text.split(sep).filter(Boolean) : [...text]
   const step = (end - start) / parts.length
@@ -56,19 +62,31 @@ const SEGMENTS = {
   ],
 }
 
+/** The user's report: a phrase, then 快 × 78 whose word timestamps all collapsed onto 10.4 s, then more speech. */
+function loopSegment() {
+  const before = words(8.6, 10.35, '我们先过去那边')
+  const loop = Array.from({ length: 78 }, () => ({ start: 10.4, end: 10.4, word: '快', probability: 0.3 }))
+  const after = words(11, 12.25, '好过来过来')
+  const all = [...before, ...loop, ...after]
+  return { start: 8.6, end: 12.25, text: all.map(w => w.word).join(''), words: all, avgLogprob: -0.6, noSpeechProb: 0.05, compressionRatio: 9.8 }
+}
+
 function transcript(language) {
   const isZh = language === 'zh'
+  const segments = SEGMENTS[isZh ? 'zh' : 'en'].map(([start, end, text]) => ({
+    start,
+    end,
+    text: isZh ? text : ` ${text}`,
+    words: isZh ? words(start, end, text) : words(start, end, text, ' '),
+    ...CONFIDENT,
+  }))
+  if (scenario === 'loop') segments.splice(2, 1, loopSegment())
   return {
     language,
     durationSec: isZh ? 16.8 : 9.8,
     model: args.model ?? 'fake',
     device: 'cpu',
-    segments: SEGMENTS[isZh ? 'zh' : 'en'].map(([start, end, text]) => ({
-      start,
-      end,
-      text: isZh ? text : ` ${text}`,
-      words: isZh ? words(start, end, text) : words(start, end, text, ' '),
-    })),
+    segments,
   }
 }
 

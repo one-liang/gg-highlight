@@ -1,4 +1,5 @@
 // Shared setup for the job tests: temp data folder, in-memory database, fake transcriber.
+import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
@@ -45,7 +46,8 @@ export interface JobTestEnv {
 export async function createJobTestEnv(): Promise<JobTestEnv> {
   const dataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'gg-jobs-'))
   const config: AppConfig = {
-    ...loadConfig({ GG_DATA_DIR: dataDir, GG_VIDEO_ENCODER: 'libx264', GG_ASR_DEVICE: 'cpu' }, ROOT_DIR),
+    // Ollama off unless a test points config.ollama at the fake server: never a developer's real Ollama.
+    ...loadConfig({ GG_DATA_DIR: dataDir, GG_VIDEO_ENCODER: 'libx264', GG_ASR_DEVICE: 'cpu', GG_OLLAMA_URL: 'off' }, ROOT_DIR),
     fontsDir: testFontsDir(),
     asrModels: { zh: 'test/zh-model', en: 'test/en-model' },
   }
@@ -89,4 +91,20 @@ export function processAlive(pid: number): boolean {
   catch {
     return false
   }
+}
+
+/**
+ * A test video with one obvious loudness peak: lavfi's sine (-18 dBFS) turned down 34 dB, except a burst
+ * from `burstAt` for 3 s, small testsrc2 picture. Matroska by default, so a full Analysis remuxes a preview.
+ */
+export function makeBurstVideo(file: string, opts: { durationSec?: number, burstAt?: number, ffmpegPath?: string } = {}): string {
+  const duration = opts.durationSec ?? 45
+  const burstAt = opts.burstAt ?? 24
+  const made = spawnSync(opts.ffmpegPath ?? 'ffmpeg', ['-v', 'error', '-y',
+    '-f', 'lavfi', '-i', `testsrc2=size=320x180:rate=10:duration=${duration}`,
+    '-f', 'lavfi', '-i', `sine=frequency=330:sample_rate=16000:duration=${duration}`,
+    '-filter:a', `volume='if(between(t,${burstAt},${burstAt + 3}),1,0.02)':eval=frame`,
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', file], { encoding: 'utf8' })
+  if (made.status !== 0) throw new Error(`ffmpeg failed: ${made.stderr}`)
+  return file
 }

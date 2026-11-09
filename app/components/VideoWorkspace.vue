@@ -3,11 +3,15 @@ import type { Clip, ClipStatus, Highlight, SourceVideo, TranscriptSegment } from
 import type { HighlightEditDraft } from '~/types/highlight-edit'
 import { videoMediaUrl } from '~/utils/api-urls'
 import { sortHighlights, upsertHighlight, validRange } from '~/utils/highlights'
-import { isClipActive, layoutLabels } from '~/utils/labels'
+import { isAnalysisActive, isClipActive, layoutLabels } from '~/utils/labels'
 import { formatTime } from '~/utils/time'
 import { replaceSegment } from '~/utils/transcript'
 
-const props = defineProps<{ video: SourceVideo }>()
+const props = defineProps<{
+  video: SourceVideo
+  /** Changes when an Analysis finished while this workspace stayed open (highlights-only run): reload the Highlights. */
+  highlightsRefreshKey?: number
+}>()
 
 const base = computed(() => `/api/videos/${encodeURIComponent(props.video.id)}`)
 const transcript = useApiData<TranscriptSegment[]>(() => `${base.value}/transcript`, '讀取逐字稿失敗')
@@ -18,6 +22,7 @@ const segments = computed(() => transcript.data.value ?? [])
 const highlights = computed(() => sortHighlights(highlightsRes.data.value ?? []))
 const clips = computed(() => clipsRes.data.value ?? [])
 usePolling(clipsRes.refresh, () => clips.value.some(isClipActive))
+watch(() => props.highlightsRefreshKey, () => void highlightsRes.refresh())
 
 const notify = useNotify()
 let lastClipStatus = new Map<string, ClipStatus>()
@@ -171,6 +176,8 @@ function onSegmentUpdated(seg: TranscriptSegment) {
         :can-preview="canPreview"
         :focused-id="focusedId"
         :clip-counts="clipCounts"
+        :signals="video.analysis.signals ?? null"
+        :analysis-active="isAnalysisActive(video)"
         @play="playHighlight"
         @export="openExport"
         @saved="onHighlightSaved"

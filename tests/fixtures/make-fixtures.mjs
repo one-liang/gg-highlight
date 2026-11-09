@@ -62,6 +62,27 @@ function twoTrackVideo(target, speechWav) {
   })
 }
 
+/**
+ * A minute of "stream" for candidate Highlights: Chinese speech at 0–17 s, quiet game audio
+ * (about -46 dBFS), and a loud burst at 40–46 s that only the loudness Signal finds. One audio track,
+ * so most seconds are quiet and the ±150 s loudness baseline is the game audio.
+ */
+function highlightsVideo(target, speechWav) {
+  atomic(target, (tmp) => {
+    const d = 60
+    run('ffmpeg', ['-y', '-v', 'error',
+      '-f', 'lavfi', '-i', `testsrc2=size=960x540:rate=30:duration=${d}`,
+      '-i', speechWav,
+      // lavfi's sine has amplitude 1/8: × 0.08 ≈ -46 dBFS, × 4 ≈ -12 dBFS
+      '-f', 'lavfi', '-i', `sine=frequency=330:sample_rate=48000:duration=${d}`,
+      '-filter_complex', `[2:a]volume='if(between(t,40,46),4,0.08)':eval=frame[game];[1:a]aresample=48000,apad[sp];[sp][game]amix=inputs=2:duration=shortest:normalize=0[mix]`,
+      '-map', '0:v', '-map', '[mix]',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-g', '60',
+      '-c:a', 'aac', '-ar', '48000', '-ac', '2',
+      '-t', String(d), tmp])
+  })
+}
+
 export function makeFixtures() {
   fs.mkdirSync(FIXTURES_DIR, { recursive: true })
   const enWav = path.join(FIXTURES_DIR, 'speech-en.wav')
@@ -70,6 +91,7 @@ export function makeFixtures() {
   speech(zhWav, ZH_TEXT, 'cmn')
   twoTrackVideo(path.join(FIXTURES_DIR, 'sample-en.mkv'), enWav)
   twoTrackVideo(path.join(FIXTURES_DIR, 'sample-zh.mkv'), zhWav)
+  highlightsVideo(path.join(FIXTURES_DIR, 'highlights-zh.mkv'), zhWav)
   atomic(path.join(FIXTURES_DIR, 'sample-en.mp4'), (tmp) => {
     run('ffmpeg', ['-y', '-v', 'error', '-i', path.join(FIXTURES_DIR, 'sample-en.mkv'), '-map', '0:v', '-map', '0:a:0', '-c', 'copy', '-movflags', '+faststart', tmp])
   })
@@ -85,6 +107,7 @@ export function makeFixtures() {
     speechZh: zhWav,
     sampleEnMkv: path.join(FIXTURES_DIR, 'sample-en.mkv'),
     sampleZhMkv: path.join(FIXTURES_DIR, 'sample-zh.mkv'),
+    highlightsZhMkv: path.join(FIXTURES_DIR, 'highlights-zh.mkv'),
     sampleEnMp4: path.join(FIXTURES_DIR, 'sample-en.mp4'),
     noAudioMp4: path.join(FIXTURES_DIR, 'noaudio.mp4'),
     verticalMp4: path.join(FIXTURES_DIR, 'vertical.mp4'),

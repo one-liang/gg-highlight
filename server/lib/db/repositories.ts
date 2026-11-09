@@ -2,8 +2,8 @@
 import { randomUUID } from 'node:crypto'
 import type { SQLInputValue } from 'node:sqlite'
 import type {
-  AnalysisState, AnalysisStatus, AnalysisStep, Clip, ClipStatus, Highlight, HighlightOrigin,
-  HighlightStatus, Language, Layout, MediaInfo, Settings, SourceKind, TranscriptSegment,
+  AnalysisMode, AnalysisState, AnalysisStatus, AnalysisStep, Clip, ClipStatus, Highlight, HighlightOrigin,
+  HighlightStatus, Language, Layout, MediaInfo, Settings, SignalKind, SignalState, SourceKind, TranscriptSegment,
 } from '../../../shared/types/domain'
 import { transaction } from './schema'
 import type { ClipRecord, Db, Repositories, VideoRecord } from './types'
@@ -27,6 +27,9 @@ interface VideoRow {
   analysis_queued_at: string | null
   analysis_started_at: string | null
   analysis_finished_at: string | null
+  analysis_mode: AnalysisMode
+  analysis_version: number | null
+  analysis_signals_json: string | null
   created_at: string
 }
 
@@ -84,6 +87,29 @@ function parseMedia(json: string | null): MediaInfo | null {
   }
 }
 
+const SIGNAL_KINDS: ReadonlySet<string> = new Set<SignalKind>(['loudness', 'transcript', 'chat', 'heatmap'])
+
+function isSignalState(value: unknown): value is SignalState {
+  if (typeof value !== 'object' || value === null) return false
+  const v = value as Record<string, unknown>
+  return typeof v.kind === 'string' && SIGNAL_KINDS.has(v.kind)
+    && (v.status === 'used' || v.status === 'missing')
+    && (v.reason === null || typeof v.reason === 'string')
+}
+
+/** Stored SignalState[]; null when absent or not a valid list. */
+function parseSignals(json: string | null): SignalState[] | null {
+  if (!json) return null
+  try {
+    const value: unknown = JSON.parse(json)
+    if (!Array.isArray(value) || !value.every(isSignalState)) return null
+    return value.map(({ kind, status, reason }) => ({ kind, status, reason }))
+  }
+  catch {
+    return null
+  }
+}
+
 function toVideo(row: VideoRow): VideoRecord {
   return {
     id: row.id,
@@ -96,6 +122,9 @@ function toVideo(row: VideoRow): VideoRecord {
     media: parseMedia(row.media_json),
     analysis: {
       status: row.analysis_status,
+      mode: row.analysis_mode,
+      version: row.analysis_version,
+      signals: parseSignals(row.analysis_signals_json),
       step: row.analysis_step,
       progress: row.analysis_progress,
       error: row.analysis_error,
@@ -149,6 +178,23 @@ function toClipRecord(row: ClipRow): ClipRecord {
     createdAt: row.created_at,
     finishedAt: row.finished_at,
   }
+}
+
+/**
+ * Keep rule of a new Analysis (design.md「重新分析」): selected, dismissed and manual Highlights, and
+ * any Highlight with clips, stay; only analysis candidates that were never exported are replaced.
+ * REPLACEABLE_SQL below is the same rule in SQL.
+ */
+export function isKeptOnReanalysis(highlight: Pick<Highlight, 'origin' | 'status'>, hasClips: boolean): boolean {
+  return !(highlight.origin === 'analysis' && highlight.status === 'candidate' && !hasClips)
+}
+
+/** WHERE condition (on the highlights table) for the Highlights a new Analysis replaces. */
+const REPLACEABLE_SQL = `(origin = 'analysis' AND status = 'candidate'
+  AND NOT EXISTS (SELECT 1 FROM clips WHERE clips.highlight_id = highlights.id))`
+
+function overlaps(a: { start: number, end: number }, b: { start: number, end: number }): boolean {
+  return a.start < b.end && b.start < a.end
 }
 
 export function toClip(record: ClipRecord): Clip {
@@ -271,6 +317,9 @@ export function createRepositories(db: Db): Repositories {
       if (patch.error !== undefined) columns.analysis_error = patch.error
       if (patch.startedAt !== undefined) columns.analysis_started_at = patch.startedAt
       if (patch.finishedAt !== undefined) columns.analysis_finished_at = patch.finishedAt
+      if (patch.mode !== undefined) columns.analysis_mode = patch.mode
+      if (patch.version !== undefined) columns.analysis_version = patch.version
+      if (patch.signals !== undefined) columns.analysis_signals_json = patch.signals ? JSON.stringify(patch.signals) : null
       updateById(db, 'videos', id, columns)
       return getVideo(id)
     },
@@ -328,6 +377,12 @@ export function createRepositories(db: Db): Repositories {
     },
   }
 
+  const listHighlights = (videoId: string, where = '') => {
+    const rows = db.prepare(`SELECT * FROM highlights WHERE video_id = ?${where} ORDER BY "start", "end", rowid`)
+      .all(videoId) as unknown as HighlightRow[]
+    return rows.map(toHighlight)
+  }
+
   const highlights: Repositories['highlights'] = {
     insert(highlight) {
       const id = randomUUID()
@@ -352,9 +407,7 @@ export function createRepositories(db: Db): Repositories {
     get: getHighlight,
 
     listByVideo(videoId) {
-      const rows = db.prepare('SELECT * FROM highlights WHERE video_id = ? ORDER BY "start", "end", rowid')
-        .all(videoId) as unknown as HighlightRow[]
-      return rows.map(toHighlight)
+      return listHighlights(videoId)
     },
 
     update(id, patch) {
@@ -372,6 +425,28 @@ export function createRepositories(db: Db): Repositories {
     deleteByVideo(videoId, origin) {
       if (origin) db.prepare('DELETE FROM highlights WHERE video_id = ? AND origin = ?').run(videoId, origin)
       else db.prepare('DELETE FROM highlights WHERE video_id = ?').run(videoId)
+    },
+
+    listKept(videoId) {
+      return listHighlights(videoId, ` AND NOT ${REPLACEABLE_SQL}`)
+    },
+
+    replaceAnalysisCandidates(videoId, drafts) {
+      return transaction(db, () => {
+        db.prepare(`DELETE FROM highlights WHERE video_id = ? AND ${REPLACEABLE_SQL}`).run(videoId)
+        // Re-read inside the transaction: the user may have selected, exported or added Highlights
+        // while the candidates were being computed.
+        const taken: Array<{ start: number, end: number }> = listHighlights(videoId)
+        const inserted: Highlight[] = []
+        for (const draft of [...drafts].sort((a, b) => a.start - b.start)) {
+          if (!(draft.end > draft.start) || taken.some(range => overlaps(range, draft))) continue
+          taken.push(draft)
+          inserted.push(highlights.insert({
+            videoId, start: draft.start, end: draft.end, status: 'candidate', origin: 'analysis', score: draft.score, reason: draft.reason,
+          }))
+        }
+        return inserted
+      })
     },
   }
 

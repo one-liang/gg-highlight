@@ -1,5 +1,6 @@
 import path from 'node:path'
 import type { Language } from '../../shared/types/domain'
+import { DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_URL, type OllamaConfig } from './llm/types'
 
 export interface AppConfig {
   /** Project root; start.mjs and the dev server run with cwd set to it. */
@@ -18,6 +19,8 @@ export interface AppConfig {
   asrDevice: 'auto' | 'cuda' | 'cpu'
   /** Forces a video encoder instead of probing for NVENC. */
   videoEncoderOverride: 'h264_nvenc' | 'libx264' | null
+  /** Local LLM for the transcript Signal; url null = GG_OLLAMA_URL=off. */
+  ollama: OllamaConfig
 }
 
 export const DEFAULT_ASR_MODELS: Record<Language, string> = {
@@ -29,6 +32,18 @@ function parseCommand(value: string): string[] {
   const trimmed = value.trim()
   if (trimmed.startsWith('[')) return JSON.parse(trimmed) as string[]
   return trimmed.split(/\s+/)
+}
+
+/**
+ * GG_OLLAMA_URL / GG_OLLAMA_MODEL (same rules as scripts/doctor.mjs ollamaConfig): unset or blank
+ * → the default URL; 'off' in any letter case → disabled (url null); trailing slashes removed.
+ * A blank model → the default model.
+ */
+export function parseOllamaConfig(env: NodeJS.ProcessEnv): OllamaConfig {
+  const rawUrl = (env.GG_OLLAMA_URL ?? '').trim()
+  const url = rawUrl.toLowerCase() === 'off' ? null : (rawUrl || DEFAULT_OLLAMA_URL).replace(/\/+$/, '')
+  const model = (env.GG_OLLAMA_MODEL ?? '').trim() || DEFAULT_OLLAMA_MODEL
+  return { url, model }
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.cwd()): AppConfig {
@@ -50,6 +65,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
     },
     asrDevice: device === 'cuda' || device === 'cpu' ? device : 'auto',
     videoEncoderOverride: encoder === 'h264_nvenc' || encoder === 'libx264' ? encoder : null,
+    ollama: parseOllamaConfig(env),
   }
 }
 

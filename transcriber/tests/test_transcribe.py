@@ -32,6 +32,28 @@ def test_segment_to_dict_rounds_and_keeps_raw_words():
     assert segment_to_dict(SimpleNamespace(start=0, end=1, text=None, words=None)) == {'start': 0.0, 'end': 1.0, 'text': '', 'words': []}
 
 
+def test_segment_to_dict_exports_confidence_measures():
+    seg = fake_segment(0, 1, '快', [(0, 1, '快', 0.9)])
+    seg.avg_logprob = -0.123456
+    seg.no_speech_prob = 0.654321
+    seg.compression_ratio = 2.71828
+    out = segment_to_dict(seg)
+    assert out['avgLogprob'] == -0.1235
+    assert out['noSpeechProb'] == 0.6543
+    assert out['compressionRatio'] == 2.7183
+    assert list(out) == ['start', 'end', 'text', 'words', 'avgLogprob', 'noSpeechProb', 'compressionRatio']
+
+
+def test_segment_to_dict_omits_missing_or_non_finite_confidence():
+    seg = fake_segment(0, 1, '快', [])
+    seg.avg_logprob = None
+    seg.no_speech_prob = float('nan')
+    seg.compression_ratio = float('inf')
+    assert segment_to_dict(seg) == {'start': 0.0, 'end': 1.0, 'text': '快', 'words': []}
+    # The JSON stays valid for write_json_atomic (allow_nan=False).
+    json.dumps(segment_to_dict(seg), allow_nan=False)
+
+
 def test_collect_segments_reports_end_over_duration():
     events = []
     segments = [fake_segment(0, 2, 'a', []), fake_segment(2, 2.01, 'b', []), fake_segment(3, 5, 'c', [])]
@@ -107,6 +129,9 @@ def test_real_transcription_with_tiny_model_on_cpu(tmp_path, speech_en):
         for w in seg['words']:
             assert w['start'] <= w['end']
             assert 0 <= w['probability'] <= 1
+        assert seg['avgLogprob'] <= 0
+        assert 0 <= seg['noSpeechProb'] <= 1
+        assert seg['compressionRatio'] > 0
     text = ' '.join(w['word'] for w in words).lower()
     assert 'welcome' in text
     assert 'stream' in text

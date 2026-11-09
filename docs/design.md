@@ -35,7 +35,7 @@
   - `prepare-preview`：瀏覽器能直接播的檔案（mp4/mov + h264/av1/vp9 + aac/mp3/opus）不另外處理；只有容器不對（例如 OBS 的 mkv）就 remux 成 `data/videos/<id>/preview.mp4`；編碼也不支援才轉成 720p h264（能用 NVENC 就用，NVENC 執行時失敗就用 libx264 重轉一次，見「輸出剪輯」）。預覽一律用音軌 0。
   - `signals`：計算各訊號（見「訊號」），結果存 `data/videos/<id>/signals.json`。步驟內進度：音量 10%、AI 讀逐字稿 90%（依讀完的區段數）。
   - `candidates`：產生候選精華片段（見「候選精華片段」），一次交易取代舊的候選。
-- `highlights` 的步驟與權重：`extract-audio`（10%，`signals.json` 裡已有音量時跳過）→ `signals`（85%）→ `candidates`（5%）。不動逐字稿（保留使用者的修改）、不動預覽；用目前資料庫裡的逐字稿文字給 AI 讀。
+- `highlights` 的步驟與權重：`extract-audio`（10%，`signals.json` 裡已有音量時跳過）→ `signals`（85%）→ `candidates`（5%）。不動逐字稿（保留使用者的修改）、不動預覽；用目前資料庫裡的逐字稿文字給 AI 讀。原始影片檔不見了（或擷取音訊失敗）而且沒有上次的音量時，音量訊號 `missing`（附原因），分析照常完成。
 - 沒有音訊的影片在 `probe` 後就失敗（無法辨識語音）；整段都沒說話時逐字稿是空的，只靠音量找候選。
 
 ### 重新分析
@@ -46,8 +46,8 @@
   - 預設：有改過的逐字稿段落時選「只重新找精華」，否則選「重新辨識」。
 - 不論哪一種：選用、捨棄、手動新增的精華片段，以及有剪輯的精華片段都保留；只有「還是候選、沒輸出過」的分析片段會被新的候選取代。新的候選不會和保留下來的片段重疊。
 - 在里程碑 2 之前分析完成的影片（分析版本 1）顯示提示：「這支影片分析時還沒有自動找精華」，可以直接按「找精華片段」（`highlights`）或「重新分析全部」（`full`）。
-- 規則：正在排隊或分析中 → 409；`highlights` 需要已經有逐字稿（分析完成，或上一次是 `highlights`）→ 否則 409；`full` 時這支影片還有剪輯在排隊或輸出中 → 409（輸出會讀逐字稿）。
-- 「只找精華」在排隊、執行或失敗時，逐字稿、精華片段與剪輯照常可以看、改、輸出；`full` 在排隊或執行中則跟第一次分析一樣，完成前不能操作。
+- 規則（依序檢查）：正在排隊或分析中 → 409；`highlights` 需要已經有逐字稿（分析完成，或上一次是 `highlights`）→ 否則 409；`full` 時這支影片還有剪輯在排隊或輸出中 → 409（輸出會讀逐字稿）；`full` 時找不到原始影片檔 → 422（`highlights` 不需要原始檔，見「分析」）。
+- 「只找精華」在排隊、執行或失敗時，逐字稿、精華片段與剪輯照常可以看、改、輸出；`full` 在排隊、執行或失敗時則跟第一次分析一樣，要等分析完成才能操作（失敗時按「重試」，用同一種模式再跑一次）。改逐字稿、新增或調整精華片段、輸出剪輯在這時都回 409。
 
 ### 逐字稿清理
 
@@ -68,10 +68,10 @@
 - 每次分析記下每種訊號 `used`（有用到）或 `missing`（沒有，附原因），影片頁顯示「這次的候選依據」。
 - **音量**（`loudness`）：讀 `audio.wav`（RIFF 分段解析、串流讀取，不假設 44 位元組標頭），每 0.5 秒算 RMS（dBFS），3 秒滑動平均得到短期響度；和前後各 150 秒的中位數比，高出 3 dB 以上開始計分、高出 12 dB 為滿分；低於 −50 dBFS 一律 0。結果（每秒 dB）存進 `signals.json`，「只找精華」可以重用。
 - **逐字稿**（`transcript`）：本機 Ollama 跑 Qwen（預設 `qwen3.5:9b`，ADR-0002）讀逐字稿：
-  - 每 10 分鐘一個區段、前後重疊 60 秒；每行一個逐字稿段落，格式 `行號|文字`（不給時間，省 token、模型也比較不會抄錯）。
+  - 每 10 分鐘一個區段、前後重疊 60 秒（區段文字超過 12,000 字也會提早結束，讓提示詞放得進 `num_ctx`）；每行一個逐字稿段落，格式 `行號|文字`（不給時間，省 token、模型也比較不會抄錯）。
   - `POST /api/chat`：`think: false`、`stream: true`（避免 Node fetch 的 5 分鐘標頭逾時）、`format` 是這個區段專用的 JSON schema（`highlights` 最多 5 個，每個 `startLine`／`endLine` 為 1..行數的整數、`reason` 最多 40 字、`score` 1–10 的整數，`reason` 在 `score` 前面）、`options`：`num_ctx 16384`（每次相同，避免重新載入模型）、`temperature 0.2`、`top_p 0.8`、`top_k 20`、`presence_penalty 0`、`num_predict 768`、`seed 42`；`keep_alive "10m"`。
   - 提示詞用台灣繁體中文，說明這是遊戲實況的語音辨識文字（會有錯字），什麼算精華（大笑、尖叫、失誤或逆轉、鬥嘴、過關、好笑的對話），什麼不算（打招呼、閒聊、等待、念聊天室或感謝訂閱、技術細節）；6 分以下不要回傳，可以回空陣列；理由用一句 20 字以內的台灣繁體中文。
-  - 回傳的行號超出範圍就截到範圍內、起訖顛倒就對調、6 分以下丟掉；換成時間：`[第 startLine 行的開始, 第 endLine 行的結束]`，該範圍每秒的值為 `(score − 1) ÷ 9`，重疊取最大值。理由經 OpenCC 轉台灣正體、去掉引號、只留第一句、最多 40 字。
+  - 回傳的行號超出範圍就截到範圍內、起訖顛倒就對調、低於 6 分的丟掉（6 分保留）；換成時間：`[第 startLine 行的開始, 第 endLine 行的結束]`，該範圍每秒的值為 `(score − 1) ÷ 9`，重疊取最大值。理由經 OpenCC 轉台灣正體、去掉引號、只留第一句、最多 40 字。
   - 開始前檢查：`GET /api/version`（3 秒逾時，需要 0.31.2 以上）與 `GET /api/tags`（模型已下載）。連不到、版本太舊、沒有模型 → 這個訊號 `missing`，附上要怎麼做（「請確認 Ollama 已啟動」「請執行 ollama pull qwen3.5:9b」），分析照常完成。
   - 單一區段失敗（逾時 10 分鐘、回應不是合法 JSON、`done_reason` 是 `length`）→ 用 `temperature 0` 重試一次，還是失敗就跳過這個區段；全部區段都失敗才算 `missing`。使用者取消或程式關閉時中止請求，照一般的取消／關閉處理，不算訊號失敗。
   - 結束時（成功、失敗或取消）都送 `{ model, messages: [], keep_alive: 0 }` 卸載模型，讓下一支影片的語音辨識有足夠的顯示卡記憶體。
@@ -195,8 +195,8 @@ data/downloads/<videoId>.<ext> YouTube 下載（里程碑 3）
 | `GG_ASR_MODEL_ZH` / `GG_ASR_MODEL_EN` | Breeze / large-v3-turbo | 模型（測試用 `Systran/faster-whisper-tiny`） |
 | `GG_ASR_DEVICE` | `auto` | `auto`／`cuda`／`cpu` |
 | `GG_VIDEO_ENCODER` | 自動偵測 | 強制 `h264_nvenc` 或 `libx264` |
-| `GG_OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama 位址；設成 `off` 就不用 AI 讀逐字稿（逐字稿訊號一律 `missing`），測試一定要設成假的伺服器或 `off` |
-| `GG_OLLAMA_MODEL` | `qwen3.5:9b` | Ollama 模型 |
+| `GG_OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama 位址（空白用預設值、結尾的 `/` 會去掉）；設成 `off`（不分大小寫）就不用 AI 讀逐字稿（逐字稿訊號一律 `missing`），測試一定要設成假的伺服器或 `off` |
+| `GG_OLLAMA_MODEL` | `qwen3.5:9b` | Ollama 模型（空白用預設值；沒寫標籤等於 `:latest`） |
 | `HOST` / `PORT` | `127.0.0.1` / `3939` | Nitro 監聽位址。預設值由伺服器自己套用（`server/plugins/startup.ts`），直接執行 `node .output/server/index.mjs` 也只接受本機連線，不會用 Nitro 的 `0.0.0.0:3000` |
 | `NITRO_SHUTDOWN_TIMEOUT` | `3000`（`start.mjs` 設定） | 關閉時等待未完成回應（例如播放中的影片串流）的毫秒數，之後強制關閉連線並執行 `close` hook（中止工作、結束 ffmpeg／轉錄程式） |
 
@@ -212,9 +212,9 @@ data/downloads/<videoId>.<ext> YouTube 下載（里程碑 3）
 | 403 | 路徑不在設定的影片資料夾內（`POST /api/videos`、`POST /api/probe`） |
 | 404 | 找不到影片／精華片段／剪輯／檔案，或沒有這個 API |
 | 405 | 這個 API 路徑不支援這個方法（回應帶 `Allow`；`HEAD` 視同沒有本文的 `GET`） |
-| 409 | 狀態不允許：同一路徑重複加入、只有 `failed` 可以重試、分析完成前不能輸出、影片資訊還沒讀取完成、重新分析的條件不符（見「重新分析」） |
+| 409 | 狀態不允許：同一路徑重複加入、只有 `failed` 可以重試、分析完成前不能輸出／改逐字稿／新增或調整精華片段（「只找精華」除外，見「重新分析」）、影片資訊還沒讀取完成、重新分析的條件不符（見「重新分析」） |
 | 415 | 上傳的副檔名不是影片 |
-| 422 | 內容不合理：精華片段範圍不對、讀不到影片檔、分析用音軌不存在、原始影片檔不見了無法輸出 |
+| 422 | 內容不合理：精華片段範圍不對、讀不到影片檔、分析用音軌不存在、原始影片檔不見了無法輸出或重新辨識語音 |
 
 任何沒有 route 處理的 `/api/**` 請求（包括已知路徑配上錯的方法）都回 JSON 404／405，不會落到 SPA 頁面。
 
@@ -225,7 +225,7 @@ data/downloads/<videoId>.<ext> YouTube 下載（里程碑 3）
 | `GET /api/videos/:id` | `SourceVideo` |
 | `DELETE /api/videos/:id` | 依「從影片庫移除」規則刪除 → `{ ok: true }` |
 | `POST /api/videos/:id/retry` | 只限 `failed` → 用同一種模式重新排隊 → `SourceVideo` |
-| `POST /api/videos/:id/reanalyze` | body `ReanalyzeBody`（`{ mode: 'full' \| 'highlights' }`）→ 排隊 → `SourceVideo`；條件見「重新分析」 |
+| `POST /api/videos/:id/reanalyze` | body `ReanalyzeBody`（`{ mode: 'full' \| 'highlights' }`）→ 排隊 → `SourceVideo`（`analysis.status` 為 `queued`、`mode` 為要求的模式）；條件見「重新分析」 |
 | `GET /api/videos/:id/media` | 預覽或原檔串流（Range） |
 | `GET /api/videos/:id/transcript` | `TranscriptSegment[]` |
 | `PATCH /api/videos/:id/transcript/:idx` | body `UpdateSegmentBody` → `TranscriptSegment` |
@@ -252,8 +252,8 @@ data/downloads/<videoId>.<ext> YouTube 下載（里程碑 3）
 
 ## 測試
 
-- `pnpm test`（Vitest）：純函式單元測試＋用真的 ffmpeg 跑的整合測試。測試素材由 `tests/fixtures/make-fixtures.mjs` 產生（espeak-ng 合成語音 + testsrc2 畫面，含雙音軌 mkv）。
+- `pnpm test`（Vitest）：純函式單元測試＋用真的 ffmpeg 跑的整合測試。測試素材由 `tests/fixtures/make-fixtures.mjs` 產生（espeak-ng 合成語音 + testsrc2 畫面，含雙音軌 mkv，以及給候選精華片段用的一分鐘影片 `highlights-zh.mkv`：開頭是中文語音，40–46 秒有一段只有音量訊號找得到的大聲響）。
 - 轉錄整合測試用 `Systran/faster-whisper-tiny` 在 CPU 上跑。
 - 雲端開發環境沒有顯示卡：NVENC、CUDA、Breeze 的實際效果由使用者在 Windows 上確認。
-- `pnpm test:e2e`（Playwright）：啟動整個 app 走一次「加入影片 → 分析 → 改逐字稿 → 新增精華片段 → 輸出剪輯」，以及「候選精華片段 → 選用 → 輸出」與重新分析。
-- Ollama 一律用假的 HTTP 伺服器（`server/lib/llm/test-helpers/fake-ollama.mjs`）：單元、整合、e2e 共用，可以模擬正常、沒有模型、連不到、回應壞掉、卡住。雲端環境不能執行真的 Ollama；實際模型的效果由使用者在 Windows 上確認。
+- `pnpm test:e2e`（Playwright）：啟動整個 app 走一次「加入影片 → 分析 → 改逐字稿 → 新增精華片段 → 輸出剪輯」，以及「候選精華片段 → 選用 → 輸出 → 重新分析（只找精華，保留修改與選用的片段）→ Ollama 沒有模型時只用音量 → 設定頁的 Ollama 狀態 → 舊影片的提示」。
+- Ollama 一律用假的 HTTP 伺服器（`server/lib/llm/test-helpers/fake-ollama.mjs`）：單元、整合、e2e 共用，可以模擬正常、沒有模型、連不到、回應壞掉、卡住。e2e 由 `playwright.config.ts` 啟動它（`webServer`，情境 `ok`），測試用 `POST $GG_E2E_OLLAMA_URL/__scenario` 切換情境。雲端環境不能執行真的 Ollama；實際模型的效果由使用者在 Windows 上確認。

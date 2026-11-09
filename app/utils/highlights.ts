@@ -1,5 +1,6 @@
 // Highlight helpers: ordering, filtering, range validation.
 import { MAX_SHORTS_SECONDS, type Highlight, type HighlightOrigin, type HighlightStatus } from '../../shared/types/domain'
+import { highlightStatusLabels } from './labels'
 import { formatTimeInput } from './time'
 
 export type HighlightFilter = 'all' | HighlightStatus
@@ -16,6 +17,52 @@ export const END_SLACK_SECONDS = 0.5
 
 export function sortHighlights<T extends Pick<Highlight, 'start' | 'end'>>(list: readonly T[]): T[] {
   return list.slice().sort((a, b) => a.start - b.start || a.end - b.end)
+}
+
+/** Highlight Score high to low; scoreless (manual) ones last; ties by start. */
+export function sortByScore<T extends Pick<Highlight, 'start' | 'end' | 'score'>>(list: readonly T[]): T[] {
+  return list.slice().sort((a, b) => (b.score ?? -1) - (a.score ?? -1) || a.start - b.start || a.end - b.end)
+}
+
+/** One tab of the Highlight list: 候選 by Highlight Score (best first), the others by start. */
+export function highlightsForTab<T extends Pick<Highlight, 'start' | 'end' | 'score' | 'status'>>(list: readonly T[], filter: HighlightFilter): T[] {
+  const shown = filterHighlights(list, filter)
+  return filter === 'candidate' ? sortByScore(shown) : sortHighlights(shown)
+}
+
+export interface EmptyText {
+  title: string
+  description?: string
+}
+
+export interface HighlightListState {
+  /** The Analysis reached its candidates step at least once (AnalysisState.signals is set). */
+  analysisRan: boolean
+  /** A highlights-only run is queued or running. */
+  analysisActive: boolean
+}
+
+const MARK_HINT = '用上方的起點／終點標出想剪的段落；點逐字稿的時間可以快速跳到那裡。'
+
+/** Empty state of the whole list (no Highlights at all). */
+export function emptyListText(state: HighlightListState): EmptyText {
+  if (state.analysisActive) return { title: '正在找精華片段', description: `完成後候選精華片段會出現在這裡；也可以先${MARK_HINT}` }
+  if (state.analysisRan) return { title: '這次分析沒有找到候選精華片段', description: `可以自己${MARK_HINT}` }
+  return { title: '還沒有精華片段', description: MARK_HINT }
+}
+
+/** Text for a tab with nothing in it while other tabs have Highlights. */
+export function emptyTabText(
+  filter: HighlightStatus,
+  list: readonly Pick<Highlight, 'origin'>[],
+  state: HighlightListState,
+): string {
+  const label = highlightStatusLabels[filter]
+  if (filter === 'candidate' && !list.some(h => h.origin === 'analysis')) {
+    if (state.analysisActive) return '正在找精華片段，完成後候選會出現在這裡'
+    if (state.analysisRan) return '這次分析沒有找到候選精華片段'
+  }
+  return `沒有「${label}」的精華片段`
 }
 
 export function filterHighlights<T extends Pick<Highlight, 'status'>>(list: readonly T[], filter: HighlightFilter): T[] {

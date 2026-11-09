@@ -4,8 +4,9 @@
   可以重複執行：已經裝好的東西會自動跳過。
 
   參數：
-    -SkipOptional  不安裝 Ollama 與 Deno（里程碑 2、3 才會用到）
-    -SkipModels    不預先下載語音辨識模型（第一次分析時才下載）
+    -SkipOptional  不安裝 Ollama（自動找精華）與 Deno（里程碑 3 才會用到）
+    -SkipModels    不預先下載模型：語音辨識模型第一次分析時才下載；
+                   Ollama 模型（qwen3.5:9b，約 6.6 GB）之後要自己執行 ollama pull
 
   This file must stay UTF-8 *with BOM*, or Windows PowerShell 5.1 reads the Chinese text as ANSI.
 #>
@@ -28,6 +29,9 @@ Set-Location -LiteralPath $Root
 $MinNodeVersion = [version]'22.13.0'
 # Oldest pnpm that reads the build approvals in pnpm-workspace.yaml. Same as MIN_PNPM_VERSION in scripts/lib/common.mjs.
 $MinPnpmVersion = [version]'10.5.0'
+# Default Ollama model for the transcript signal. Same as DEFAULT_OLLAMA_MODEL in server/lib/llm/types.ts and scripts/doctor.mjs.
+$DefaultOllamaModel = 'qwen3.5:9b'
+$DefaultOllamaModelSize = '約 6.6 GB'
 $AsrModels = @(
   @{ Id = 'SoybeanMilk/faster-whisper-Breeze-ASR-25'; Name = '中文模型 Breeze-ASR-25（約 3 GB）' },
   @{ Id = 'deepdml/faster-whisper-large-v3-turbo-ct2'; Name = '英文模型 Whisper large-v3-turbo（約 1.6 GB）' }
@@ -36,8 +40,8 @@ $Tools = @(
   @{ Name = 'Node.js'; Id = 'OpenJS.NodeJS.LTS'; Commands = @('node'); Optional = $false },
   @{ Name = 'FFmpeg'; Id = 'Gyan.FFmpeg'; Commands = @('ffmpeg', 'ffprobe'); Optional = $false },
   @{ Name = 'uv（Python 環境管理）'; Id = 'astral-sh.uv'; Commands = @('uv'); Optional = $false },
-  @{ Name = 'Ollama（里程碑 2：自動找精華）'; Id = 'Ollama.Ollama'; Commands = @('ollama'); Optional = $true },
-  @{ Name = 'Deno（里程碑 3：YouTube）'; Id = 'DenoLand.Deno'; Commands = @('deno'); Optional = $true }
+  @{ Name = 'Ollama（自動找精華）'; Id = 'Ollama.Ollama'; Commands = @('ollama'); Optional = $true; Later = '沒有 Ollama 時，自動找精華只會用音量；之後可以重新執行 setup.bat，或到 https://ollama.com/download 安裝。' },
+  @{ Name = 'Deno（里程碑 3：YouTube）'; Id = 'DenoLand.Deno'; Commands = @('deno'); Optional = $true; Later = '現在還用不到，可以之後再裝。' }
 )
 
 $script:StepNumber = 0
@@ -152,6 +156,26 @@ function Show-TranscriberLine([string]$Line) {
   }
 }
 
+# Ollama model names default to the latest tag: qwen3 and qwen3:latest are the same model.
+function Get-OllamaModelKey([string]$Name) {
+  $key = "$Name".Trim().ToLowerInvariant()
+  $lastPart = $key.Substring($key.LastIndexOf('/') + 1)
+  if ($lastPart.Contains(':')) { return $key }
+  return $key + ':latest'
+}
+
+# True when the first column of ollama list names the model. Like ollama pull, ollama list starts the Ollama app when it is not running.
+function Test-OllamaModel([string]$Model) {
+  $wanted = Get-OllamaModelKey $Model
+  $lines = & ollama list 2>$null
+  if ($LASTEXITCODE -ne 0) { return $false }
+  foreach ($line in @($lines)) {
+    $name = ("$line".Trim() -split '\s+')[0]
+    if ($name -and ((Get-OllamaModelKey $name) -eq $wanted)) { return $true }
+  }
+  return $false
+}
+
 Write-Host '=================================================='
 Write-Host ' gg-highlight 安裝程式'
 Write-Host ' 可以重複執行：已經裝好的東西會自動跳過。'
@@ -189,7 +213,7 @@ foreach ($tool in $Tools) {
   }
   if (-not $hasWinget) {
     if ($tool.Optional) {
-      Add-Note ('找不到 winget，沒有安裝 ' + $tool.Name + '。現在還用不到，可以之後再裝。')
+      Add-Note ('找不到 winget，沒有安裝 ' + $tool.Name + '。' + $tool.Later)
       continue
     }
     Stop-Setup ('需要安裝 ' + $tool.Name + '，但找不到 winget。請到 Microsoft Store 安裝或更新「應用程式安裝程式」（App Installer），再重新執行 setup.bat。')
@@ -205,7 +229,7 @@ foreach ($tool in $Tools) {
     continue
   }
   if ($tool.Optional) {
-    Add-Note ($tool.Name + ' 沒有安裝成功（winget 代碼 ' + $wingetCode + '）。現在還用不到，可以之後再裝。')
+    Add-Note ($tool.Name + ' 沒有安裝成功（winget 代碼 ' + $wingetCode + '）。' + $tool.Later)
     continue
   }
   if ($tool.Id -eq 'OpenJS.NodeJS.LTS' -and (Test-Command 'node')) {
@@ -302,7 +326,53 @@ else {
   }
 }
 
-# ---- 8. Final check ----
+# ---- 8. Ollama model ----
+# Optional: without Ollama or its model, the transcript signal is missing and highlights use loudness only.
+$OllamaModel = $DefaultOllamaModel
+if ($env:GG_OLLAMA_MODEL -and ("$env:GG_OLLAMA_MODEL".Trim().Length -gt 0)) { $OllamaModel = "$env:GG_OLLAMA_MODEL".Trim() }
+$OllamaSize = ''
+if ($OllamaModel -eq $DefaultOllamaModel) { $OllamaSize = '（' + $DefaultOllamaModelSize + '）' }
+$OllamaUrl = "$env:GG_OLLAMA_URL".Trim()
+Write-Step ('準備自動找精華用的 AI 模型（Ollama：' + $OllamaModel + '）')
+if ($OllamaUrl -eq 'off') {
+  Write-Info '已用 GG_OLLAMA_URL=off 關閉 AI 讀逐字稿，略過。自動找精華只會用音量。'
+}
+elseif ($SkipOptional) {
+  if (Test-Command 'ollama') {
+    Write-Info '略過檢查 Ollama 模型（-SkipOptional）。'
+  }
+  else {
+    Add-Note '沒有安裝 Ollama（-SkipOptional）：自動找精華只會用音量，直到安裝 Ollama 為止。想用的話，重新執行 setup.bat（不加 -SkipOptional）。'
+  }
+}
+elseif (-not (Test-Command 'ollama')) {
+  # The winget step already added a note about why Ollama is missing.
+  Write-Info '沒有 Ollama，略過下載模型。在安裝 Ollama 之前，自動找精華只會用音量；裝好之後重新執行 setup.bat 即可。'
+}
+elseif ($SkipModels) {
+  Write-Info ('略過下載（-SkipModels）。需要時請在命令提示字元執行：ollama pull ' + $OllamaModel + $OllamaSize)
+  Write-Info '下載之前，自動找精華只會用音量。'
+}
+else {
+  # The ollama CLI talks to OLLAMA_HOST; point it at the same server the app uses.
+  if ($OllamaUrl.Length -gt 0) { $env:OLLAMA_HOST = $OllamaUrl }
+  if (Test-OllamaModel $OllamaModel) {
+    Write-Ok ($OllamaModel + ' 已下載')
+  }
+  else {
+    Write-Info ('下載 ' + $OllamaModel + $OllamaSize + '，只有第一次需要，請耐心等候（ollama pull ' + $OllamaModel + '）…')
+    & ollama pull $OllamaModel
+    $pullCode = $LASTEXITCODE
+    if ($pullCode -eq 0) {
+      Write-Ok ($OllamaModel + ' 已就緒')
+    }
+    else {
+      Add-Note ('Ollama 模型 ' + $OllamaModel + ' 沒有下載成功（ollama 代碼 ' + $pullCode + '）。自動找精華會先只用音量。請從開始功能表打開 Ollama、確認網路連線後，在命令提示字元執行 ollama pull ' + $OllamaModel + '，或重新執行 setup.bat。')
+    }
+  }
+}
+
+# ---- 9. Final check ----
 Write-Step '最後檢查環境（node scripts\doctor.mjs）'
 & node (Join-Path $Root 'scripts\doctor.mjs')
 $doctorCode = $LASTEXITCODE

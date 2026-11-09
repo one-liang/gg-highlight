@@ -1,16 +1,23 @@
-// API tests against the real Nitro build, with the fake transcriber and real ffmpeg.
+// API tests against the real Nitro build, with the fake transcriber, the fake Ollama and real ffmpeg.
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { Clip, Highlight, MediaInfo, Settings, SourceVideo, SystemInfo, TranscriptSegment, UploadResult, WatchFolderFile } from '../../shared/types/domain'
+import { type FakeOllama, startFakeOllama } from '../../server/lib/llm/test-helpers/fake-ollama.mjs'
 import { fixtures } from '../fixtures'
 import { api, ensureBuild, FAKE_TRANSCRIBER, getBytes, ROOT_DIR, type RunningServer, startServer, uploadFile, waitUntil } from './server'
+
+const OLLAMA_VERSION = '0.40.15'
+const OLLAMA_MODEL = 'qwen3.5:9b'
+/** The fake Ollama's first reason, in Simplified Chinese; the server stores it in Taiwan Traditional. */
+const OK_REASON = '大家笑成一團的反應'
 
 const SYSTEM_NOTO = '/usr/share/fonts/opentype/noto'
 
 let server: RunningServer
+let ollama: FakeOllama
 let base: string
 let tmp: string
 let dataDir: string
@@ -62,6 +69,7 @@ beforeAll(async () => {
   await fsp.writeFile(path.join(watchDir, 'notes.txt'), 'not a video')
   await fsp.copyFile(fx.sampleEnMp4, path.join(outsideDir, 'outside.mp4'))
 
+  ollama = await startFakeOllama({ version: OLLAMA_VERSION, models: [OLLAMA_MODEL] })
   server = await startServer({
     GG_DATA_DIR: dataDir,
     GG_FONTS_DIR: fontsDir(),
@@ -71,6 +79,10 @@ beforeAll(async () => {
     GG_ASR_MODEL_EN: 'test/en-model',
     GG_ASR_MODEL_ZH: 'test/zh-model',
     GG_FAKE_FAIL_FILE: failMarker,
+    // A slower fake transcriber, so a 'full' re-analysis is still queued or running while the guards are checked.
+    GG_FAKE_DELAY_MS: '100',
+    GG_OLLAMA_URL: ollama.url,
+    GG_OLLAMA_MODEL: OLLAMA_MODEL,
   })
   base = server.url
 })
@@ -81,6 +93,7 @@ afterAll(async () => {
     // Graceful shutdown (close hook: stop queues, close the database).
     expect(code === 0 || code === null).toBe(true)
   }
+  await ollama?.close()
   if (tmp) await fsp.rm(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 })
 
@@ -89,8 +102,23 @@ describe('system and settings', () => {
     const res = await api<SystemInfo>(base, 'GET', '/api/system')
     expect(res.status).toBe(200)
     const pkg = JSON.parse(await fsp.readFile(path.join(ROOT_DIR, 'package.json'), 'utf8')) as { version: string }
-    expect(res.body).toEqual({ version: pkg.version, videoEncoder: 'libx264', videoEncoderForced: true, dataDir, fontsReady: true })
+    expect(res.body).toEqual({
+      version: pkg.version, videoEncoder: 'libx264', videoEncoderForced: true, dataDir, fontsReady: true,
+      ollama: { url: ollama.url, model: OLLAMA_MODEL, status: 'ready', version: OLLAMA_VERSION },
+    })
     expect(fs.existsSync(path.join(dataDir, 'gg-highlight.db'))).toBe(true)
+  })
+
+  it('GET /api/system reports a missing model and an outdated Ollama', async () => {
+    try {
+      ollama.setScenario('model-missing')
+      expect((await api<SystemInfo>(base, 'GET', '/api/system')).body.ollama).toEqual({ url: ollama.url, model: OLLAMA_MODEL, status: 'model-missing', version: OLLAMA_VERSION })
+      ollama.setScenario('old-version')
+      expect((await api<SystemInfo>(base, 'GET', '/api/system')).body.ollama).toMatchObject({ status: 'outdated', version: '0.20.0' })
+    }
+    finally {
+      ollama.setScenario('ok')
+    }
   })
 
   it('unknown API routes answer a JSON 404 instead of the SPA page', async () => {
@@ -265,9 +293,21 @@ describe('a watch-folder video end to end', () => {
     expect(files.body.find(f => f.path === mkvPath)?.inLibrary).toBe(true)
   })
 
-  it('finishes the Analysis with a transcript and a remuxed preview', async () => {
+  it('finishes the Analysis with a transcript, a remuxed preview and a candidate Highlight with a reason', async () => {
     const done = await waitForAnalysis(video.id)
-    expect(done.analysis).toMatchObject({ status: 'done', progress: 1, error: null })
+    expect(done.analysis).toMatchObject({
+      status: 'done', mode: 'full', version: 2, progress: 1, error: null,
+      signals: [{ kind: 'loudness', status: 'used', reason: null }, { kind: 'transcript', status: 'used', reason: null }],
+    })
+    const candidates = (await api<Highlight[]>(base, 'GET', `/api/videos/${video.id}/highlights`)).body
+    expect(candidates.length).toBeGreaterThan(0)
+    for (const c of candidates) {
+      expect(c).toMatchObject({ videoId: video.id, origin: 'analysis', status: 'candidate', reason: OK_REASON })
+      expect(c.score).toBeGreaterThan(0)
+    }
+    expect(fs.existsSync(path.join(dataDir, 'videos', video.id, 'signals.json'))).toBe(true)
+    // The model was unloaded after reading the Transcript.
+    expect(ollama.requests.at(-1)?.body).toEqual({ model: OLLAMA_MODEL, messages: [], keep_alive: 0 })
     const list = await api<SourceVideo[]>(base, 'GET', '/api/videos')
     expect(list.body.map(v => v.id)).toEqual([video.id])
 
@@ -365,7 +405,7 @@ describe('a watch-folder video end to end', () => {
     expect(early.status).toBe(200)
 
     const list = await api<Highlight[]>(base, 'GET', url)
-    expect(list.body.map(h => h.id)).toEqual([early.body.id, highlight.id])
+    expect(list.body.filter(h => h.origin === 'manual').map(h => h.id)).toEqual([early.body.id, highlight.id])
 
     const dismissed = await api<Highlight>(base, 'PATCH', `/api/highlights/${early.body.id}`, { status: 'dismissed' })
     expect(dismissed.body.status).toBe('dismissed')
@@ -444,6 +484,126 @@ describe('a watch-folder video end to end', () => {
   })
 })
 
+describe('re-analysis', () => {
+  let video: SourceVideo
+  let manual: Highlight
+  let exported: Highlight
+
+  const highlights = async () => (await api<Highlight[]>(base, 'GET', `/api/videos/${video.id}/highlights`)).body
+  const transcript = async () => (await api<TranscriptSegment[]>(base, 'GET', `/api/videos/${video.id}/transcript`)).body
+  const overlaps = (a: Highlight, b: Highlight) => a.start < b.end && b.start < a.end
+
+  it('validates the request, and answers 409 while the video is queued or being analysed', async () => {
+    const zhPath = path.join(watchDir, '中文 直播.mkv')
+    await fsp.copyFile(fixtures().sampleZhMkv, zhPath)
+    const added = await api<SourceVideo>(base, 'POST', '/api/videos', { sourceKind: 'watch-folder', filePath: zhPath, language: 'zh', audioTrack: 1 })
+    expect(added.status).toBe(200)
+    video = added.body
+    for (const mode of ['full', 'highlights']) {
+      const busy = await api(base, 'POST', `/api/videos/${video.id}/reanalyze`, { mode })
+      expect([busy.status, busy.body.statusMessage]).toEqual([409, '這支影片正在排隊或分析中，請等分析結束再重新分析'])
+    }
+    expect((await waitForAnalysis(video.id)).analysis.status).toBe('done')
+
+    expect((await api(base, 'POST', '/api/videos/nope/reanalyze', { mode: 'full' })).status).toBe(404)
+    const bad = await api(base, 'POST', `/api/videos/${video.id}/reanalyze`, { mode: 'all' })
+    expect([bad.status, bad.body.statusMessage]).toEqual([400, '重新分析的方式必須是 full（重新辨識語音並找精華）或 highlights（只重新找精華片段）'])
+    expect((await api(base, 'POST', `/api/videos/${video.id}/reanalyze`, '{not json')).status).toBe(400)
+    const get = await api(base, 'GET', `/api/videos/${video.id}/reanalyze`)
+    expect([get.status, get.headers.get('allow')]).toEqual([405, 'POST'])
+  })
+
+  it('full is refused while clips of the video are exporting', async () => {
+    // A manual Highlight, an exported candidate, and an edit in the Transcript.
+    const created = await api<Highlight>(base, 'POST', `/api/videos/${video.id}/highlights`, { start: 0.5, end: 2 })
+    manual = created.body
+    const [candidate] = (await highlights()).filter(h => h.origin === 'analysis')
+    expect(candidate).toBeDefined()
+    exported = candidate!
+    const edited = await api<TranscriptSegment>(base, 'PATCH', `/api/videos/${video.id}/transcript/0`, { text: '大家好，這是改過的字幕' })
+    expect(edited.body.edited).toBe(true)
+
+    // Two exports: the second one is certainly still queued when the request below arrives.
+    for (let i = 0; i < 2; i++) {
+      expect((await api(base, 'POST', `/api/highlights/${exported.id}/clips`, { layout: 'original', burnSubtitles: false })).status).toBe(200)
+    }
+    const busy = await api(base, 'POST', `/api/videos/${video.id}/reanalyze`, { mode: 'full' })
+    expect([busy.status, busy.body.statusMessage]).toEqual([409, '這支影片還有剪輯在排隊或輸出中，請等輸出完成再重新辨識語音'])
+    await waitUntil(async () => {
+      const clips = (await api<Clip[]>(base, 'GET', `/api/videos/${video.id}/clips`)).body
+      return clips.every(c => c.status === 'done' || c.status === 'failed')
+    })
+  })
+
+  it('highlights keeps the edited Transcript and the kept Highlights, and stays editable while it runs', async () => {
+    const before = await transcript()
+    const res = await api<SourceVideo>(base, 'POST', `/api/videos/${video.id}/reanalyze`, { mode: 'highlights' })
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ id: video.id, analysis: { mode: 'highlights' } })
+    expect(['queued', 'running']).toContain(res.body.analysis.status)
+    expect((await api(base, 'POST', `/api/videos/${video.id}/reanalyze`, { mode: 'full' })).status).toBe(409)
+    // Editing goes on during a highlights-only run.
+    const edit = await api<TranscriptSegment>(base, 'PATCH', `/api/videos/${video.id}/transcript/1`, { text: '今天我們要玩新遊戲，哈哈' })
+    expect(edit.status).toBe(200)
+
+    const done = await waitForAnalysis(video.id)
+    expect(done.analysis).toMatchObject({ status: 'done', mode: 'highlights', version: 2, error: null })
+    const after = await transcript()
+    expect(after.map(s => [s.start, s.end])).toEqual(before.map(s => [s.start, s.end]))
+    expect(after[0]).toMatchObject({ text: '大家好，這是改過的字幕', edited: true })
+    expect(after[1]).toMatchObject({ text: '今天我們要玩新遊戲，哈哈', edited: true })
+
+    const list = await highlights()
+    expect(list.map(h => h.id)).toEqual(expect.arrayContaining([manual.id, exported.id]))
+    for (const fresh of list.filter(h => h.status === 'candidate' && h.id !== exported.id)) {
+      expect(overlaps(fresh, manual) || overlaps(fresh, exported)).toBe(false)
+    }
+  })
+
+  it('full transcribes again (edits are replaced) and keeps manual and exported Highlights; nothing can be changed until it is done', async () => {
+    const res = await api<SourceVideo>(base, 'POST', `/api/videos/${video.id}/reanalyze`, { mode: 'full' })
+    expect(res.status).toBe(200)
+    expect(res.body.analysis.mode).toBe('full')
+    const guards: Array<[string, string, unknown, string]> = [
+      ['PATCH', `/api/videos/${video.id}/transcript/0`, { text: 'x' }, '影片分析完成後才能修改逐字稿'],
+      ['POST', `/api/videos/${video.id}/highlights`, { start: 3, end: 4 }, '影片分析完成後才能新增精華片段'],
+      ['PATCH', `/api/highlights/${manual.id}`, { status: 'dismissed' }, '影片分析完成後才能調整精華片段'],
+      ['POST', `/api/highlights/${manual.id}/clips`, { layout: 'original', burnSubtitles: true }, '影片分析完成後才能輸出剪輯'],
+    ]
+    for (const [method, url, body, message] of guards) {
+      const r = await api(base, method, url, body)
+      expect([r.status, r.body.statusMessage], `${method} ${url}`).toEqual([409, message])
+    }
+    expect((await api<SourceVideo>(base, 'GET', `/api/videos/${video.id}`)).body.analysis.status).not.toBe('done')
+
+    const done = await waitForAnalysis(video.id)
+    expect(done.analysis).toMatchObject({ status: 'done', mode: 'full', version: 2 })
+    const after = await transcript()
+    expect(after.every(s => !s.edited)).toBe(true)
+    expect(after.map(s => s.text).join('')).toContain('歡迎回到直播')
+    expect((await highlights()).map(h => h.id)).toEqual(expect.arrayContaining([manual.id, exported.id]))
+    expect((await api(base, 'PATCH', `/api/highlights/${manual.id}`, { status: 'dismissed' })).status).toBe(200)
+  })
+
+  it('full needs the source file (422); highlights runs without it', async () => {
+    const copy = path.join(watchDir, '會被刪掉.mp4')
+    await fsp.copyFile(mp4Path, copy)
+    const added = await api<SourceVideo>(base, 'POST', '/api/videos', { sourceKind: 'watch-folder', filePath: copy, language: 'en', audioTrack: 0 })
+    expect((await waitForAnalysis(added.body.id)).analysis.status).toBe('done')
+    await fsp.rm(copy)
+
+    const full = await api(base, 'POST', `/api/videos/${added.body.id}/reanalyze`, { mode: 'full' })
+    expect([full.status, full.body.statusMessage]).toEqual([422, '找不到原始影片檔，無法重新辨識語音'])
+    const res = await api<SourceVideo>(base, 'POST', `/api/videos/${added.body.id}/reanalyze`, { mode: 'highlights' })
+    expect(res.status).toBe(200)
+    expect(res.body.fileMissing).toBe(true)
+    const done = await waitForAnalysis(added.body.id)
+    expect(done.analysis).toMatchObject({ status: 'done', mode: 'highlights' })
+    expect(done.analysis.signals?.map(s => s.status)).toEqual(['used', 'used'])
+    expect((await api(base, 'DELETE', `/api/videos/${added.body.id}`)).status).toBe(200)
+  })
+})
+
 describe('uploads', () => {
   let upload: UploadResult
 
@@ -503,28 +663,46 @@ describe('uploads', () => {
 })
 
 describe('failure, retry and removal', () => {
-  it('a failed Analysis can be retried; only failed ones', async () => {
+  it('a failed Analysis can be retried in the same mode; only failed ones', async () => {
     await fsp.writeFile(failMarker, '1')
     const added = await api<SourceVideo>(base, 'POST', '/api/videos', { sourceKind: 'watch-folder', filePath: mp4Path, language: 'en', audioTrack: 0 })
     expect(added.status).toBe(200)
-    const failed = await waitForAnalysis(added.body.id)
-    expect(failed.analysis).toMatchObject({ status: 'failed', step: 'transcribe', error: '語音辨識失敗：語音辨識模型載入失敗（測試）' })
+    const id = added.body.id
+    const failed = await waitForAnalysis(id)
+    expect(failed.analysis).toMatchObject({ status: 'failed', mode: 'full', step: 'transcribe', error: '語音辨識失敗：語音辨識模型載入失敗（測試）' })
 
-    // No exports before the Analysis is done.
-    const h = await api<Highlight>(base, 'POST', `/api/videos/${added.body.id}/highlights`, { start: 1, end: 2 })
-    expect(h.status).toBe(200)
-    const clip = await api(base, 'POST', `/api/highlights/${h.body.id}/clips`, { layout: 'original', burnSubtitles: true })
-    expect(clip.status).toBe(409)
-    expect(clip.body.statusMessage).toBe('影片分析完成後才能輸出剪輯')
+    // No Transcript yet: nothing to edit or find highlights in.
+    const h = await api(base, 'POST', `/api/videos/${id}/highlights`, { start: 1, end: 2 })
+    expect([h.status, h.body.statusMessage]).toEqual([409, '影片分析完成後才能新增精華片段'])
+    const edit = await api(base, 'PATCH', `/api/videos/${id}/transcript/0`, { text: 'x' })
+    expect([edit.status, edit.body.statusMessage]).toEqual([409, '影片分析完成後才能修改逐字稿'])
+    const onlyHighlights = await api(base, 'POST', `/api/videos/${id}/reanalyze`, { mode: 'highlights' })
+    expect([onlyHighlights.status, onlyHighlights.body.statusMessage]).toEqual([409, '這支影片還沒有逐字稿，只能選「重新辨識語音並找精華」'])
 
     await fsp.rm(failMarker)
-    const retry = await api<SourceVideo>(base, 'POST', `/api/videos/${added.body.id}/retry`)
+    const retry = await api<SourceVideo>(base, 'POST', `/api/videos/${id}/retry`)
     expect(retry.status).toBe(200)
+    expect(retry.body.analysis).toMatchObject({ mode: 'full' })
     expect(['queued', 'running']).toContain(retry.body.analysis.status)
-    const done = await waitForAnalysis(added.body.id)
-    expect(done.analysis.status).toBe('done')
+    expect((await waitForAnalysis(id)).analysis.status).toBe('done')
 
-    const again = await api(base, 'POST', `/api/videos/${added.body.id}/retry`)
+    // A failed full re-analysis: no exports or edits until it is done again; the retry keeps 'full'.
+    const manual = await api<Highlight>(base, 'POST', `/api/videos/${id}/highlights`, { start: 1, end: 2 })
+    expect(manual.status).toBe(200)
+    await fsp.writeFile(failMarker, '1')
+    expect((await api(base, 'POST', `/api/videos/${id}/reanalyze`, { mode: 'full' })).status).toBe(200)
+    expect((await waitForAnalysis(id)).analysis).toMatchObject({ status: 'failed', mode: 'full', version: 2 })
+    const clip = await api(base, 'POST', `/api/highlights/${manual.body.id}/clips`, { layout: 'original', burnSubtitles: true })
+    expect([clip.status, clip.body.statusMessage]).toEqual([409, '影片分析完成後才能輸出剪輯'])
+    const move = await api(base, 'PATCH', `/api/highlights/${manual.body.id}`, { status: 'dismissed' })
+    expect([move.status, move.body.statusMessage]).toEqual([409, '影片分析完成後才能調整精華片段'])
+    await fsp.rm(failMarker)
+    expect((await api<SourceVideo>(base, 'POST', `/api/videos/${id}/retry`)).body.analysis.mode).toBe('full')
+    expect((await waitForAnalysis(id)).analysis.status).toBe('done')
+    const kept = (await api<Highlight[]>(base, 'GET', `/api/videos/${id}/highlights`)).body
+    expect(kept.map(x => x.id)).toContain(manual.body.id)
+
+    const again = await api(base, 'POST', `/api/videos/${id}/retry`)
     expect(again.status).toBe(409)
     expect(again.body.statusMessage).toBe('只有分析失敗的影片可以重試')
     expect((await api(base, 'POST', '/api/videos/nope/retry')).status).toBe(404)
@@ -583,6 +761,8 @@ describe('restart recovery (startup plugin)', () => {
     let pid = 0
     try {
       expect((await api(slow.url, 'PUT', '/api/settings', { watchFolders: [watchDir] })).status).toBe(200)
+      // startServer turns Ollama off unless a test sets GG_OLLAMA_URL.
+      expect((await api<SystemInfo>(slow.url, 'GET', '/api/system')).body.ollama).toMatchObject({ url: null, status: 'disabled', version: null })
       const added = await api<SourceVideo>(slow.url, 'POST', '/api/videos', { sourceKind: 'watch-folder', filePath: mp4Path, language: 'en', audioTrack: 0 })
       expect(added.status).toBe(200)
       await waitUntil(async () => fs.existsSync(pidFile))
@@ -640,5 +820,26 @@ describe('restart recovery (startup plugin)', () => {
 
   it('re-runs an Analysis interrupted by a crash', async () => {
     await restartCase('SIGKILL')
+  })
+})
+
+describe('Ollama going away', () => {
+  it('GET /api/system answers quickly with status unreachable, and an Analysis still finishes with loudness only', async () => {
+    await ollama.close()
+    const started = Date.now()
+    const res = await api<SystemInfo>(base, 'GET', '/api/system')
+    expect(res.status).toBe(200)
+    expect(res.body.ollama).toEqual({ url: ollama.url, model: OLLAMA_MODEL, status: 'unreachable', version: null })
+    expect(Date.now() - started).toBeLessThan(3000)
+
+    const videos = (await api<SourceVideo[]>(base, 'GET', '/api/videos')).body
+    const target = videos.find(v => v.filePath === mp4Path)!
+    expect((await api(base, 'POST', `/api/videos/${target.id}/reanalyze`, { mode: 'highlights' })).status).toBe(200)
+    const done = await waitForAnalysis(target.id)
+    expect(done.analysis.status).toBe('done')
+    expect(done.analysis.signals).toEqual([
+      { kind: 'loudness', status: 'used', reason: null },
+      { kind: 'transcript', status: 'missing', reason: `連不到 Ollama（${ollama.url}），請確認 Ollama 已啟動` },
+    ])
   })
 })

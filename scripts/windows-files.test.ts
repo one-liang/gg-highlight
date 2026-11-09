@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { DEFAULT_OLLAMA_MODEL } from './doctor.mjs'
 import { MIN_PNPM_VERSION } from './lib/common.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -61,6 +62,31 @@ describe('setup.ps1', () => {
     expect(text).toMatch(/\$pnpmVersion -lt \$MinPnpmVersion/)
     // The version comes from running `pnpm --version`, so a shim that cannot run counts as missing.
     expect(text).toMatch(/& pnpm --version 2>\$null/)
+  })
+
+  it('pulls the Ollama model of the app, unless models or Ollama are skipped', () => {
+    expect(text).toContain(`$DefaultOllamaModel = '${DEFAULT_OLLAMA_MODEL}'`)
+    expect(text).toContain('約 6.6 GB')
+    const step = text.slice(text.indexOf('# ---- 8.'), text.indexOf('# ---- 9.'))
+    expect(step).toMatch(/\$env:GG_OLLAMA_MODEL/)
+    expect(step).toMatch(/\$OllamaUrl -eq 'off'/)
+    expect(step).toMatch(/Test-OllamaModel \$OllamaModel/)
+    expect(text).toMatch(/& ollama list 2>\$null/)
+    // Inherits the console so the user sees the download progress; a failure is only a note.
+    expect(step).toMatch(/^\s*& ollama pull \$OllamaModel\s*$/m)
+    expect(step).toMatch(/Add-Note \('Ollama 模型 '/)
+    // Each skip path comes before the pull, and Ollama missing or skipped says highlights use loudness only.
+    const pull = step.indexOf('& ollama pull')
+    for (const guard of ['elseif ($SkipOptional)', 'elseif (-not (Test-Command \'ollama\'))', 'elseif ($SkipModels)']) {
+      expect(step.indexOf(guard), guard).toBeGreaterThan(0)
+      expect(step.indexOf(guard), guard).toBeLessThan(pull)
+    }
+    expect(step).toMatch(/-SkipOptional）：自動找精華只會用音量/)
+  })
+
+  it('names features instead of milestone 2', () => {
+    expect(text).not.toContain('里程碑 2')
+    expect(text).toContain('Ollama（自動找精華）')
   })
 
   it('runs pnpm install without a Y/n prompt and explains a failure without blaming the network', () => {

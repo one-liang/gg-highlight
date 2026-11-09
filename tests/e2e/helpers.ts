@@ -1,12 +1,15 @@
 // Shared steps for the e2e specs.
 import fs from 'node:fs'
 import path from 'node:path'
-import { expect, type Locator, type Page, type TestInfo } from '@playwright/test'
+import { type APIRequestContext, expect, type Locator, type Page, type TestInfo } from '@playwright/test'
+import type { SourceVideo } from '../../shared/types/domain'
 import { FIXTURES_DIR } from '../fixtures/make-fixtures.mjs'
 
 export { FIXTURES_DIR }
 export const SAMPLE_EN_MKV = path.join(FIXTURES_DIR, 'sample-en.mkv')
 export const SAMPLE_EN_MP4 = path.join(FIXTURES_DIR, 'sample-en.mp4')
+/** 60 s: Chinese speech at 0–17 s, quiet game audio, a loud burst at 40–46 s (one audio track). */
+export const HIGHLIGHTS_ZH_MKV = path.join(FIXTURES_DIR, 'highlights-zh.mkv')
 
 /** Analysis with the tiny model on CPU, plus the preview remux. */
 export const ANALYSIS_TIMEOUT = 3 * 60_000
@@ -68,4 +71,38 @@ export async function deleteFromLibrary(page: Page, title: string): Promise<void
   await dialog.getByRole('button', { name: '移除', exact: true }).click()
   await expect(dialog).toBeHidden()
   await expect(row).toHaveCount(0)
+}
+
+/** Scenarios of server/lib/llm/test-helpers/fake-ollama.mjs. */
+export type FakeOllamaScenario = 'ok' | 'empty' | 'invalid-json' | 'length' | 'http500' | 'hang' | 'model-missing' | 'old-version'
+
+/** Switches the fake Ollama that playwright.config.ts started (scenario 'ok' at the start of the run). */
+export async function setOllamaScenario(request: APIRequestContext, scenario: FakeOllamaScenario): Promise<void> {
+  const url = process.env.GG_E2E_OLLAMA_URL
+  if (!url) throw new Error('GG_E2E_OLLAMA_URL is not set (see playwright.config.ts)')
+  const res = await request.post(`${url}/__scenario`, { data: { scenario } })
+  expect(res.ok(), await res.text()).toBe(true)
+}
+
+/** The video id in the URL of a video page. */
+export function videoIdOf(page: Page): string {
+  const id = /\/videos\/([^/?#]+)/.exec(page.url())?.[1]
+  if (!id) throw new Error(`not a video page: ${page.url()}`)
+  return decodeURIComponent(id)
+}
+
+/**
+ * Waits until the server reports the video's Analysis as finished. Call it after the request that
+ * queued the run returned: from then on the stored status is queued / running until this run ends.
+ */
+export async function waitForAnalysisFinished(request: APIRequestContext, videoId: string): Promise<SourceVideo> {
+  const get = async (): Promise<SourceVideo | null> => {
+    const res = await request.get(`/api/videos/${encodeURIComponent(videoId)}`)
+    return res.ok() ? (await res.json()) as SourceVideo : null
+  }
+  await expect.poll(async () => (await get())?.analysis.status, { timeout: ANALYSIS_TIMEOUT, intervals: [250, 500, 1000] })
+    .toMatch(/^(done|failed)$/)
+  const video = await get()
+  if (!video) throw new Error(`video ${videoId} disappeared`)
+  return video
 }

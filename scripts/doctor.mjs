@@ -13,6 +13,7 @@ import {
   lastLine,
   MIN_NODE_VERSION,
   MIN_PNPM_VERSION,
+  parseVersion,
   pnpmVersionOk,
   projectRoot,
   runCommand,
@@ -20,7 +21,7 @@ import {
 
 export { compareVersions, parseVersion } from './lib/common.mjs'
 
-/** @typedef {'ok'|'warn'|'fail'|'later'} CheckStatus */
+/** @typedef {'ok'|'warn'|'fail'|'later'} CheckStatus  'later' = not in use: a later milestone, or switched off. */
 /**
  * @typedef {object} CheckResult
  * @property {string} id
@@ -36,6 +37,15 @@ export const ICONS = { ok: '✅', warn: '⚠️', fail: '❌', later: '➖' }
 const TRANSCRIBER_TIMEOUT_MS = 10 * 60_000
 const NVENC_TIMEOUT_MS = 30_000
 const VERSION_TIMEOUT_MS = 30_000
+
+// Same values as server/lib/llm/types.ts (doctor.test.ts compares them).
+export const DEFAULT_OLLAMA_URL = 'http://127.0.0.1:11434'
+export const DEFAULT_OLLAMA_MODEL = 'qwen3.5:9b'
+export const MIN_OLLAMA_VERSION = '0.31.2'
+/** Download size of DEFAULT_OLLAMA_MODEL, shown in the fix text. */
+const DEFAULT_OLLAMA_MODEL_SIZE = '約 6.6 GB'
+/** GET /api/version and /api/tags together must answer within this. */
+const OLLAMA_TIMEOUT_MS = 3000
 
 /** @returns {CheckResult} */
 function result(id, label, status, detail, fix = null, required = true) {
@@ -60,6 +70,10 @@ export function createContext(overrides = {}) {
     ffprobePath: env.GG_FFPROBE || 'ffprobe',
     fontsDir: resolveFontsDir(env, root),
     dataDir: path.resolve(root, env.GG_DATA_DIR || 'data'),
+    ollama: ollamaConfig(env),
+    ollamaTimeoutMs: OLLAMA_TIMEOUT_MS,
+    /** @type {typeof fetch} */
+    fetch: (input, init) => globalThis.fetch(input, init),
     onProgress: () => {},
     ...overrides,
   }
@@ -124,6 +138,52 @@ export function parseNvidiaSmi(stdout) {
       return { name, driver: driver || null }
     })
     .filter(gpu => gpu.name)
+}
+
+/**
+ * Ollama base URL (null when GG_OLLAMA_URL=off) and model; empty values mean the defaults.
+ * @returns {{ url: string | null, model: string }}
+ */
+export function ollamaConfig(env = process.env) {
+  const raw = env.GG_OLLAMA_URL?.trim() ?? ''
+  const url = raw === '' ? DEFAULT_OLLAMA_URL : raw.toLowerCase() === 'off' ? null : raw.replace(/\/+$/, '')
+  return { url, model: env.GG_OLLAMA_MODEL?.trim() || DEFAULT_OLLAMA_MODEL }
+}
+
+/** Ollama names default to the ':latest' tag: 'qwen3' and 'qwen3:latest' are the same model. */
+export function normalizeOllamaModel(name) {
+  const lower = String(name ?? '').trim().toLowerCase()
+  const lastSegment = lower.slice(lower.lastIndexOf('/') + 1)
+  return lastSegment.includes(':') ? lower : `${lower}:latest`
+}
+
+/** True when the GET /api/tags body lists `model` (by `name` or `model`). */
+export function ollamaHasModel(tags, model) {
+  if (!Array.isArray(tags?.models)) return false
+  const wanted = normalizeOllamaModel(model)
+  return tags.models.some(entry => [entry?.name, entry?.model]
+    .some(n => typeof n === 'string' && normalizeOllamaModel(n) === wanted))
+}
+
+/** True when `version` is older than the minimum. Unparsable versions are not treated as old (same as the server). */
+export function ollamaVersionTooOld(version, min = MIN_OLLAMA_VERSION) {
+  return parseVersion(version) !== null && compareVersions(version, min) < 0
+}
+
+/** GET a JSON object; null on any failure (network, timeout, HTTP error, not JSON). */
+async function getJson(doFetch, url, signal) {
+  try {
+    const res = await doFetch(url, { signal })
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => {})
+      return null
+    }
+    const value = await res.json()
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null
+  }
+  catch {
+    return null
+  }
 }
 
 /** argv prefix of the transcriber CLI, same rules as server/lib/config.ts. */
@@ -294,10 +354,54 @@ export async function checkNvidiaSmi(ctx) {
     false)
 }
 
+/**
+ * Ollama for the transcript Signal: reachable, new enough, model pulled. Optional: without it
+ * 自動找精華 still works with loudness only, so problems are warnings.
+ */
+export async function checkOllama(ctx) {
+  const label = 'Ollama（自動找精華）'
+  const warn = (detail, fix) => result('ollama', label, 'warn', detail, fix, false)
+  const { url, model } = ctx.ollama
+  const volumeOnly = '在那之前，自動找精華只會用音量。'
+  if (!url) {
+    return result('ollama', label, 'later', '已關閉（GG_OLLAMA_URL=off），自動找精華只用音量', null, false)
+  }
+  if (!URL.canParse(url)) {
+    return warn(`GG_OLLAMA_URL 格式不正確：${url}`, `改成像 ${DEFAULT_OLLAMA_URL} 的網址，或設成 off 關閉 AI 讀逐字稿`)
+  }
+  const signal = AbortSignal.timeout(ctx.ollamaTimeoutMs)
+  const doFetch = ctx.fetch
+  const versionBody = await getJson(doFetch, `${url}/api/version`, signal)
+  // Something that answers without a version is not Ollama.
+  const version = typeof versionBody?.version === 'string' ? versionBody.version : null
+  if (!version) {
+    if (url !== DEFAULT_OLLAMA_URL) {
+      return warn(`連不到 Ollama（${url}）`, `確認 GG_OLLAMA_URL 設定正確，而且那裡的 Ollama 已啟動。${volumeOnly}`)
+    }
+    const installed = await ctx.run('ollama', ['--version'], { timeoutMs: 10_000 })
+    if (installed.notFound) {
+      return warn('找不到 Ollama', `重新執行 setup.bat（會安裝 Ollama 並下載 ${model} 模型），或到 https://ollama.com/download 安裝。${volumeOnly}`)
+    }
+    return warn(`連不到 Ollama（${url}）`, `啟動 Ollama（從開始功能表打開 Ollama），再執行一次 node scripts/doctor.mjs。${volumeOnly}`)
+  }
+  if (ollamaVersionTooOld(version)) {
+    return warn(`Ollama ${version}，需要 ${MIN_OLLAMA_VERSION} 以上`,
+      `更新 Ollama：執行 winget upgrade --id Ollama.Ollama，或到 https://ollama.com/download 下載最新版。${volumeOnly}`)
+  }
+  const tags = await getJson(doFetch, `${url}/api/tags`, signal)
+  if (!tags) {
+    return warn(`Ollama ${version} 有回應，但讀不到模型清單`, `重新啟動 Ollama，再執行一次 node scripts/doctor.mjs。${volumeOnly}`)
+  }
+  if (!ollamaHasModel(tags, model)) {
+    const size = model === DEFAULT_OLLAMA_MODEL ? `（${DEFAULT_OLLAMA_MODEL_SIZE}）` : ''
+    return warn(`Ollama ${version}，還沒有 ${model} 模型`, `執行 ollama pull ${model}${size}，或重新執行 setup.bat。${volumeOnly}`)
+  }
+  return result('ollama', label, 'ok', `Ollama ${version}，模型 ${model}`, null, false)
+}
+
 /** Tools for later milestones: listed, never failing. */
 export async function checkLaterTools(ctx) {
   const tools = [
-    { id: 'ollama', label: 'Ollama', command: 'ollama', why: '里程碑 2「自動找精華」才會用到' },
     { id: 'deno', label: 'Deno', command: 'deno', why: '里程碑 3「YouTube」才會用到' },
   ]
   return Promise.all(tools.map(async (tool) => {
@@ -309,7 +413,7 @@ export async function checkLaterTools(ctx) {
 
 /** Runs every check; results come back in display order. */
 export async function runChecks(ctx = createContext()) {
-  const [node, pnpm, ffmpegGroup, uv, fonts, data, smi, later] = await Promise.all([
+  const [node, pnpm, ffmpegGroup, uv, fonts, data, smi, ollama, later] = await Promise.all([
     checkNode(ctx),
     checkPnpm(ctx),
     checkFfmpeg(ctx),
@@ -317,6 +421,7 @@ export async function runChecks(ctx = createContext()) {
     checkFonts(ctx),
     checkDataDir(ctx),
     checkNvidiaSmi(ctx),
+    checkOllama(ctx),
     checkLaterTools(ctx),
   ])
   const ffmpegOk = ffmpegGroup[0].status === 'ok'
@@ -324,7 +429,7 @@ export async function runChecks(ctx = createContext()) {
     checkNvenc(ctx, ffmpegOk),
     checkTranscriber(ctx, uv.status === 'ok'),
   ])
-  return [node, pnpm, ...ffmpegGroup, nvenc, uv, transcriber, fonts, data, smi, ...later]
+  return [node, pnpm, ...ffmpegGroup, nvenc, uv, transcriber, fonts, data, smi, ollama, ...later]
 }
 
 /** Required items that failed. */

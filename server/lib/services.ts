@@ -22,6 +22,8 @@ export interface CreateServicesOptions {
   dbFile?: string
   transcriberCommand?: string[]
   log?: (message: string) => void
+  /** HTTP client the Analysis uses for Ollama (tests); defaults to globalThis.fetch. */
+  fetch?: typeof fetch
 }
 
 export function databasePath(config: AppConfig): string {
@@ -38,6 +40,7 @@ export function createServices(config: AppConfig = getConfig(), opts: CreateServ
     tools,
     transcriberCommand: opts.transcriberCommand ?? config.transcriberCommand,
     log: opts.log ?? ((message: string) => console.log(message)),
+    fetch: opts.fetch,
   }
   const analysis = new AnalysisQueue(deps)
   const exports = new ExportQueue(deps)

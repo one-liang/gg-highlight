@@ -27,6 +27,7 @@ describe('services', () => {
     expect(services.analysis).toBeInstanceOf(AnalysisQueue)
     expect(services.exports).toBeInstanceOf(ExportQueue)
     expect(services.analysis.deps.transcriberCommand).toEqual(['node', 'fake.mjs'])
+    expect(services.analysis.deps.config.ollama).toEqual(config.ollama)
     expect(services.tools).toEqual({ ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' })
     expect(services.repos.settings.get()).toEqual({ watchFolders: [] })
 

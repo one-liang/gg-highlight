@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { Settings, SystemInfo } from '~~/shared/types/domain'
 import { apiErrorMessage } from '~/utils/api-error'
-import { videoEncoderLabels } from '~/utils/labels'
+import { ollamaFixHint, ollamaStatusColors, ollamaStatusLabels, videoEncoderLabels } from '~/utils/labels'
 import { normalizeFolderInput, validateFolderInput } from '~/utils/watch-folder'
 
 useHead({ title: '設定' })
@@ -11,6 +11,8 @@ const settings = useApiData<Settings>('/api/settings', '讀取設定失敗')
 const system = useApiData<SystemInfo>('/api/system', '讀取系統資訊失敗')
 
 const folders = computed(() => settings.data.value?.watchFolders ?? [])
+const ollama = computed(() => system.data.value?.ollama ?? null)
+const ollamaHint = computed(() => (ollama.value ? ollamaFixHint(ollama.value) : null))
 const newFolder = ref('')
 const addError = ref<string | null>(null)
 const saving = ref(false)
@@ -182,7 +184,7 @@ async function copyDataDir() {
                 系統資訊
               </h2>
               <p class="mt-1 text-sm text-muted">
-                輸出剪輯用的編碼器、資料存放位置與字幕字型狀態。
+                輸出剪輯用的編碼器、資料存放位置、字幕字型，以及自動找精華用的本機 AI（Ollama）狀態。
               </p>
             </div>
           </div>
@@ -260,6 +262,51 @@ async function copyDataDir() {
                   燒錄字幕需要 Noto Sans CJK TC。請在專案資料夾執行 <code class="rounded bg-elevated px-1 py-0.5 font-mono text-highlighted">pnpm fonts</code>，或重新執行專案資料夾裡的安裝腳本 <code class="rounded bg-elevated px-1 py-0.5 font-mono text-highlighted">setup.bat</code>，完成後重新整理這一頁。
                 </p>
               </div>
+            </dd>
+          </div>
+
+          <div v-if="ollama" class="grid gap-1 py-3 sm:grid-cols-[10rem_1fr] sm:gap-4">
+            <dt class="text-muted">
+              AI 讀逐字稿
+            </dt>
+            <dd class="space-y-1.5">
+              <div class="flex flex-wrap items-center gap-2">
+                <UBadge
+                  v-if="ollama.status === 'ready'"
+                  :label="`已就緒（Ollama ${ollama.version ?? ''}・${ollama.model}）`"
+                  :color="ollamaStatusColors.ready"
+                  variant="subtle"
+                  icon="i-lucide-circle-check"
+                />
+                <UBadge
+                  v-else
+                  :label="ollamaStatusLabels[ollama.status]"
+                  :color="ollamaStatusColors[ollama.status]"
+                  variant="subtle"
+                  :icon="ollama.status === 'disabled' ? 'i-lucide-circle-minus' : 'i-lucide-triangle-alert'"
+                />
+                <UButton
+                  label="重新檢查"
+                  icon="i-lucide-refresh-cw"
+                  color="neutral"
+                  variant="ghost"
+                  size="xs"
+                  :loading="system.loading.value"
+                  @click="system.refresh"
+                />
+              </div>
+              <p v-if="ollama.status !== 'ready'" class="text-xs text-muted">
+                模型 <code class="font-mono">{{ ollama.model }}</code><template v-if="ollama.version">・Ollama {{ ollama.version }}</template><template v-if="ollama.url">・<code class="break-all font-mono">{{ ollama.url }}</code></template>
+              </p>
+              <template v-if="ollamaHint">
+                <p class="text-xs leading-relaxed text-muted">
+                  {{ ollamaHint.text }}
+                </p>
+                <code v-if="ollamaHint.command" class="inline-block rounded bg-elevated px-1.5 py-0.5 font-mono text-xs text-highlighted">{{ ollamaHint.command }}</code>
+              </template>
+              <p v-else class="text-xs text-muted">
+                分析時本機 AI 會讀逐字稿找精華，用完立刻從顯示卡記憶體卸載。
+              </p>
             </dd>
           </div>
 

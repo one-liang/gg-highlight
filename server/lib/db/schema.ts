@@ -88,6 +88,19 @@ export const MIGRATIONS: Migration[] = [
       );
     `,
   },
+  {
+    // Milestone 2: mode, pipeline version and Signals of the Analysis (design.md「分析」).
+    // ADD COLUMN only: rebuilding the videos table inside this savepoint (foreign keys are on)
+    // would cascade-delete every highlight and clip.
+    version: 2,
+    sql: `
+      ALTER TABLE videos ADD COLUMN analysis_mode TEXT NOT NULL DEFAULT 'full'
+        CHECK (analysis_mode IN ('full', 'highlights'));
+      ALTER TABLE videos ADD COLUMN analysis_version INTEGER;
+      ALTER TABLE videos ADD COLUMN analysis_signals_json TEXT;
+      UPDATE videos SET analysis_version = 1 WHERE analysis_status = 'done';
+    `,
+  },
 ]
 
 let savepointSeq = 0

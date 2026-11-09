@@ -35,6 +35,14 @@ export interface NewHighlight {
   reason: string | null
 }
 
+/** A candidate Highlight from the Analysis (buildCandidates' CandidateDraft). */
+export interface AnalysisCandidateDraft {
+  start: number
+  end: number
+  score: number
+  reason: string
+}
+
 export interface Repositories {
   videos: {
     /** New videos start with analysis status 'queued'. */
@@ -65,6 +73,14 @@ export interface Repositories {
     listByVideo(videoId: string): Highlight[]
     update(id: string, patch: Partial<Pick<Highlight, 'start' | 'end' | 'status' | 'score' | 'reason'>>): Highlight | null
     deleteByVideo(videoId: string, origin?: HighlightOrigin): void
+    /** Highlights a new Analysis keeps (isKeptOnReanalysis), ordered by start: the ranges new candidates must avoid. */
+    listKept(videoId: string): Highlight[]
+    /**
+     * One transaction: deletes the analysis candidates that have no clips, re-reads the kept
+     * Highlights, drops drafts overlapping a kept range (or an earlier draft), inserts the rest as
+     * origin 'analysis' / status 'candidate' and returns them ordered by start.
+     */
+    replaceAnalysisCandidates(videoId: string, drafts: AnalysisCandidateDraft[]): Highlight[]
   }
   clips: {
     /** New clips start 'queued' with progress 0. */

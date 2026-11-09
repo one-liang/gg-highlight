@@ -1,5 +1,13 @@
 <script setup lang="ts">
-import type { SourceVideo } from '~~/shared/types/domain'
+import type { AnalysisMode, Highlight, SourceVideo } from '~~/shared/types/domain'
+import {
+  analysisDoneNotice,
+  analysisFailedTitle,
+  canReanalyze,
+  countCandidates,
+  isTranscriptReady,
+  needsHighlightsUpgrade,
+} from '~/utils/analysis'
 import { formatFps, formatResolution } from '~/utils/format'
 import { isAnalysisActive, languageLabels } from '~/utils/labels'
 import { formatDuration } from '~/utils/time'
@@ -15,13 +23,37 @@ const { data: video, error, loaded, loading, refresh, set } = useApiData<SourceV
 
 usePolling(refresh, () => !!video.value && isAnalysisActive(video.value))
 
-// tell the user when the analysis they are watching finishes
-watch(() => video.value?.analysis.status, (now, before) => {
+/** Bumped when a run finishes, so a workspace that stayed open (highlights-only run) reloads its Highlights. */
+const highlightsRefreshKey = ref(0)
+
+async function countFoundCandidates(videoId: string): Promise<number | null> {
+  try {
+    const list = await apiFetch<Highlight[]>(`/api/videos/${encodeURIComponent(videoId)}/highlights`)
+    return Array.isArray(list) ? countCandidates(list) : null
+  }
+  catch {
+    return null
+  }
+}
+
+// tell the user when the analysis they are watching finishes, with how many candidates it found
+watch(() => video.value?.analysis.status, async (now, before) => {
   if (before !== 'queued' && before !== 'running') return
-  if (now === 'done') notify.success('分析完成', '可以開始修改逐字稿、標出精華片段了。')
-  else if (now === 'failed') notify.message('分析失敗', video.value?.analysis.error ?? undefined)
+  const current = video.value
+  if (!current) return
+  const mode = current.analysis.mode
+  if (now === 'done') {
+    highlightsRefreshKey.value++
+    const notice = analysisDoneNotice(mode, await countFoundCandidates(current.id))
+    notify.success(notice.title, notice.description)
+  }
+  else if (now === 'failed') {
+    notify.message(analysisFailedTitle(mode), current.analysis.error ?? undefined)
+  }
 })
 useHead({ title: () => video.value?.title ?? '影片' })
+
+const transcriptReady = computed(() => !!video.value && isTranscriptReady(video.value))
 
 const retrying = ref(false)
 async function retry() {
@@ -37,6 +69,26 @@ async function retry() {
   finally {
     retrying.value = false
   }
+}
+
+const reanalyzeOpen = ref(false)
+const reanalyzePreset = ref<AnalysisMode | null>(null)
+const { pending: reanalyzing, start: startReanalyze } = useReanalyze()
+
+function openReanalyze(preset: AnalysisMode | null = null) {
+  reanalyzePreset.value = preset
+  reanalyzeOpen.value = true
+}
+
+/** 「找精華片段」 on the old-video banner: keeps the Transcript, so it needs no confirmation. */
+async function findHighlights() {
+  if (!video.value) return
+  const queued = await startReanalyze(video.value.id, 'highlights')
+  if (queued) set(queued)
+}
+
+function onReanalyzeStarted(queued: SourceVideo) {
+  set(queued)
 }
 
 const deleteOpen = ref(false)
@@ -92,7 +144,18 @@ function onDeleted() {
             <span v-if="video.media && video.media.audioTracks.length > 1">分析用音軌 {{ video.audioTrack + 1 }}</span>
           </div>
         </div>
-        <UButton label="移除" icon="i-lucide-trash-2" color="neutral" variant="ghost" @click="deleteOpen = true" />
+        <div class="flex shrink-0 items-center gap-2">
+          <UButton
+            v-if="canReanalyze(video)"
+            label="重新分析"
+            icon="i-lucide-refresh-cw"
+            color="neutral"
+            variant="outline"
+            :disabled="!!reanalyzing"
+            @click="openReanalyze()"
+          />
+          <UButton label="移除" icon="i-lucide-trash-2" color="neutral" variant="ghost" @click="deleteOpen = true" />
+        </div>
       </header>
 
       <UAlert
@@ -113,7 +176,7 @@ function onDeleted() {
         class="mb-5"
       >
         <template #description>
-          <p v-if="video.analysis.status === 'done'">
+          <p v-if="transcriptReady">
             原本的檔案可能被移動、改名或刪除，因此無法預覽，也無法輸出剪輯。逐字稿與精華片段仍然可以查看與修改。
           </p>
           <p v-else>
@@ -128,20 +191,56 @@ function onDeleted() {
         </template>
       </UAlert>
 
-      <AnalysisProgressCard v-if="isAnalysisActive(video)" :video="video" class="max-w-4xl" />
+      <UAlert
+        v-if="needsHighlightsUpgrade(video)"
+        color="primary"
+        variant="subtle"
+        icon="i-lucide-sparkles"
+        title="這支影片分析時還沒有自動找精華"
+        description="現在可以依音量與逐字稿（本機 AI）自動找出候選精華片段。「找精華片段」會保留逐字稿與你的修改；「重新分析全部」會重新辨識語音，順便套用新版的逐字稿清理。"
+        class="mb-5"
+        :actions="[
+          { label: '找精華片段', icon: 'i-lucide-sparkles', color: 'primary', loading: reanalyzing === 'highlights', disabled: !!reanalyzing, onClick: findHighlights },
+          { label: '重新分析全部', icon: 'i-lucide-refresh-cw', color: 'neutral', variant: 'outline', disabled: !!reanalyzing, onClick: () => openReanalyze('full') },
+        ]"
+      />
+
+      <!-- a highlights-only run keeps the Transcript: show its progress / failure above the workspace -->
+      <template v-if="transcriptReady">
+        <AnalysisProgressCard v-if="isAnalysisActive(video)" :video="video" class="mb-5" />
+        <UAlert
+          v-else-if="video.analysis.status === 'failed'"
+          color="error"
+          variant="subtle"
+          icon="i-lucide-circle-x"
+          :title="analysisFailedTitle(video.analysis.mode)"
+          class="mb-5"
+          :actions="[{ label: '重試', icon: 'i-lucide-rotate-ccw', color: 'error', loading: retrying, onClick: retry }]"
+        >
+          <template #description>
+            <p>{{ video.analysis.error || '發生未知錯誤。' }}</p>
+            <p class="mt-1">
+              逐字稿、精華片段與剪輯不受影響，可以照常使用。
+            </p>
+          </template>
+        </UAlert>
+        <VideoWorkspace :key="video.id" :video="video" :highlights-refresh-key="highlightsRefreshKey" />
+      </template>
+
+      <AnalysisProgressCard v-else-if="isAnalysisActive(video)" :video="video" class="max-w-4xl" />
 
       <UAlert
         v-else-if="video.analysis.status === 'failed'"
         color="error"
         variant="subtle"
         icon="i-lucide-circle-x"
-        title="分析失敗"
+        :title="analysisFailedTitle(video.analysis.mode)"
         :description="video.analysis.error || '發生未知錯誤。'"
         class="max-w-4xl"
         :actions="[{ label: '重試', icon: 'i-lucide-rotate-ccw', color: 'error', loading: retrying, onClick: retry }]"
       />
 
-      <VideoWorkspace v-else-if="video.analysis.status === 'done'" :key="video.id" :video="video" />
+      <ReanalyzeModal v-model:open="reanalyzeOpen" :video="video" :preset="reanalyzePreset" @started="onReanalyzeStarted" />
     </template>
 
     <DeleteVideoModal v-model:open="deleteOpen" :video="video" @deleted="onDeleted" />

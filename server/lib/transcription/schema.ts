@@ -29,6 +29,10 @@ const rawSegmentSchema = z.object({
   end: z.number(),
   text: z.string(),
   words: z.array(rawWordSchema),
+  // Added in milestone 2; transcripts written before that have none of them.
+  avgLogprob: z.number().optional(),
+  noSpeechProb: z.number().optional(),
+  compressionRatio: z.number().optional(),
 })
 
 export const rawTranscriptSchema = z.object({

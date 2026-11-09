@@ -2,11 +2,16 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { MediaInfo } from '../../../shared/types/domain'
+import { DatabaseSync } from 'node:sqlite'
+import type { Highlight, HighlightOrigin, HighlightStatus, MediaInfo, SignalState } from '../../../shared/types/domain'
 import {
-  createRepositories, MIGRATIONS, migrate, openDatabase, schemaVersion, toClip,
+  createRepositories, isKeptOnReanalysis, MIGRATIONS, migrate, openDatabase, schemaVersion, toClip,
   type ClipRecord, type Db, type NewVideo, type Repositories,
 } from './index'
+
+const LATEST = MIGRATIONS.at(-1)!.version
+/** AnalysisState fields added in schema version 2, as a fresh video has them. */
+const FRESH = { mode: 'full', version: null, signals: null } as const
 
 const media: MediaInfo = {
   durationSec: 12.5,
@@ -78,8 +83,8 @@ describe('openDatabase', () => {
       first.close()
 
       const second = openDatabase(file)
-      expect(schemaVersion(second)).toBe(1)
-      expect(count(second, 'schema_version')).toBe(1)
+      expect(schemaVersion(second)).toBe(LATEST)
+      expect(count(second, 'schema_version')).toBe(MIGRATIONS.length)
       expect(createRepositories(second).videos.get(video.id)?.title).toBe('測試影片')
       second.close()
     }
@@ -89,18 +94,59 @@ describe('openDatabase', () => {
   })
 
   it('applies appended migrations in order and only once', () => {
-    const extra = [...MIGRATIONS, { version: 2, sql: 'CREATE TABLE extra (id INTEGER PRIMARY KEY)' }]
-    expect(migrate(db, extra)).toBe(2)
-    expect(migrate(db, extra)).toBe(2)
-    expect(count(db, 'schema_version')).toBe(2)
+    const extra = [...MIGRATIONS, { version: LATEST + 1, sql: 'CREATE TABLE extra (id INTEGER PRIMARY KEY)' }]
+    expect(migrate(db, extra)).toBe(LATEST + 1)
+    expect(migrate(db, extra)).toBe(LATEST + 1)
+    expect(count(db, 'schema_version')).toBe(MIGRATIONS.length + 1)
     expect(count(db, 'extra')).toBe(0)
   })
 
   it('rolls back a failing migration', () => {
-    const broken = [...MIGRATIONS, { version: 2, sql: 'CREATE TABLE half (id INTEGER); THIS IS NOT SQL' }]
+    const broken = [...MIGRATIONS, { version: LATEST + 1, sql: 'CREATE TABLE half (id INTEGER); THIS IS NOT SQL' }]
     expect(() => migrate(db, broken)).toThrow()
-    expect(schemaVersion(db)).toBe(1)
+    expect(schemaVersion(db)).toBe(LATEST)
     expect(db.prepare(`SELECT name FROM sqlite_master WHERE name = 'half'`).get()).toBeUndefined()
+  })
+})
+
+describe('migration 2 (milestone 2 analysis fields)', () => {
+  /** A milestone 1 database (schema version 1) with a done video that has highlights and clips. */
+  function milestone1Db(): Db {
+    const old = new DatabaseSync(':memory:')
+    old.exec('PRAGMA foreign_keys = ON')
+    migrate(old, MIGRATIONS.filter(m => m.version === 1))
+    const ts = '2026-01-01T00:00:00.000Z'
+    old.exec(`
+      INSERT INTO videos (id, title, source_kind, file_path, language, analysis_status, created_at)
+        VALUES ('done', 'd', 'watch-folder', '/rec/d.mkv', 'zh', 'done', '${ts}'),
+               ('failed', 'f', 'watch-folder', '/rec/f.mkv', 'en', 'failed', '${ts}'),
+               ('queued', 'q', 'upload', '/up/q.mp4', 'en', 'queued', '${ts}');
+      INSERT INTO transcript_segments VALUES ('done', 0, 0, 1, '改過', '原文');
+      INSERT INTO highlights VALUES ('h1', 'done', 1, 5, 'selected', 'manual', NULL, NULL, '${ts}', '${ts}'),
+                                    ('h2', 'done', 8, 9, 'candidate', 'analysis', 0.5, 'r', '${ts}', '${ts}');
+      INSERT INTO clips (id, video_id, highlight_id, "start", "end", layout, burn_subtitles, status, created_at)
+        VALUES ('c1', 'done', 'h1', 1, 5, 'original', 1, 'done', '${ts}');
+    `)
+    return old
+  }
+
+  it('adds mode, version and signals without touching highlights, clips or the transcript', () => {
+    const old = milestone1Db()
+    try {
+      expect(migrate(old)).toBe(LATEST)
+      const r = createRepositories(old)
+      expect(r.videos.get('done')!.analysis).toMatchObject({ status: 'done', mode: 'full', version: 1, signals: null })
+      expect(r.videos.get('failed')!.analysis).toMatchObject({ status: 'failed', mode: 'full', version: null, signals: null })
+      expect(r.videos.get('queued')!.analysis).toMatchObject({ status: 'queued', mode: 'full', version: null })
+      expect(r.highlights.listByVideo('done').map(h => h.id)).toEqual(['h1', 'h2'])
+      expect(r.clips.get('c1')).toMatchObject({ highlightId: 'h1', status: 'done' })
+      expect(r.transcript.list('done')).toEqual([{ idx: 0, start: 0, end: 1, text: '改過', edited: true }])
+      // the CHECK constraint guards the mode
+      expect(() => old.exec(`UPDATE videos SET analysis_mode = 'nope' WHERE id = 'done'`)).toThrow()
+    }
+    finally {
+      old.close()
+    }
   })
 })
 
@@ -118,7 +164,7 @@ describe('videos', () => {
       media,
       previewPath: null,
       createdAt: '2026-01-01T00:00:00.000Z',
-      analysis: { status: 'queued', step: null, progress: 0, error: null, startedAt: null, finishedAt: null },
+      analysis: { status: 'queued', mode: 'full', version: null, signals: null, step: null, progress: 0, error: null, startedAt: null, finishedAt: null },
     })
     expect(repos.videos.get(video.id)).toEqual(video)
     expect(repos.videos.get('nope')).toBeNull()
@@ -162,7 +208,7 @@ describe('videos', () => {
 
     at('2026-01-01T00:01:00.000Z')
     let v = repos.videos.updateAnalysis(video.id, { status: 'running', step: 'probe', progress: 0 })!
-    expect(v.analysis).toEqual({ status: 'running', step: 'probe', progress: 0, error: null, startedAt: '2026-01-01T00:01:00.000Z', finishedAt: null })
+    expect(v.analysis).toEqual({ ...FRESH, status: 'running', step: 'probe', progress: 0, error: null, startedAt: '2026-01-01T00:01:00.000Z', finishedAt: null })
 
     // Progress ticks repeat status 'running' without moving startedAt.
     at('2026-01-01T00:02:00.000Z')
@@ -172,13 +218,13 @@ describe('videos', () => {
     at('2026-01-01T00:03:00.000Z')
     v = repos.videos.updateAnalysis(video.id, { status: 'failed', error: '轉錄失敗' })!
     expect(v.analysis).toEqual({
-      status: 'failed', step: 'transcribe', progress: 0.5, error: '轉錄失敗',
+      ...FRESH, status: 'failed', step: 'transcribe', progress: 0.5, error: '轉錄失敗',
       startedAt: '2026-01-01T00:01:00.000Z', finishedAt: '2026-01-01T00:03:00.000Z',
     })
 
     at('2026-01-01T00:04:00.000Z')
     v = repos.videos.updateAnalysis(video.id, { status: 'queued' })!
-    expect(v.analysis).toEqual({ status: 'queued', step: null, progress: 0, error: null, startedAt: null, finishedAt: null })
+    expect(v.analysis).toEqual({ ...FRESH, status: 'queued', step: null, progress: 0, error: null, startedAt: null, finishedAt: null })
     const queuedAt = (db.prepare('SELECT analysis_queued_at AS q FROM videos WHERE id = ?').get(video.id) as { q: string }).q
     expect(queuedAt).toBe('2026-01-01T00:04:00.000Z')
 
@@ -187,9 +233,35 @@ describe('videos', () => {
     at('2026-01-01T00:06:00.000Z')
     v = repos.videos.updateAnalysis(video.id, { status: 'done', step: 'prepare-preview' })!
     expect(v.analysis).toEqual({
-      status: 'done', step: 'prepare-preview', progress: 1, error: null,
+      ...FRESH, status: 'done', step: 'prepare-preview', progress: 1, error: null,
       startedAt: '2026-01-01T00:05:00.000Z', finishedAt: '2026-01-01T00:06:00.000Z',
     })
+  })
+
+  it('stores mode, version and signals; a re-queue keeps them unless given', () => {
+    const video = repos.videos.insert(newVideo())
+    const signals: SignalState[] = [
+      { kind: 'loudness', status: 'used', reason: null },
+      { kind: 'transcript', status: 'missing', reason: '連不到 Ollama（http://127.0.0.1:11434），請確認 Ollama 已啟動' },
+    ]
+    let v = repos.videos.updateAnalysis(video.id, { status: 'done', version: 2, signals })!
+    expect(v.analysis).toMatchObject({ status: 'done', mode: 'full', version: 2, signals })
+    v = repos.videos.updateAnalysis(video.id, { status: 'queued', mode: 'highlights' })!
+    expect(v.analysis).toMatchObject({ status: 'queued', mode: 'highlights', version: 2, signals })
+    v = repos.videos.updateAnalysis(video.id, { status: 'failed', error: 'x' })!
+    expect(v.analysis).toMatchObject({ mode: 'highlights', version: 2 })
+    v = repos.videos.updateAnalysis(video.id, { status: 'queued' })!
+    expect(v.analysis.mode).toBe('highlights')
+    v = repos.videos.updateAnalysis(video.id, { signals: null, version: null, mode: 'full' })!
+    expect(v.analysis).toMatchObject({ mode: 'full', version: null, signals: null })
+  })
+
+  it('reads unreadable stored signals as null', () => {
+    const video = repos.videos.insert(newVideo())
+    for (const json of ['not json', '{}', '[{"kind":"nope","status":"used","reason":null}]', '[{"kind":"loudness","status":"used"}]']) {
+      db.prepare('UPDATE videos SET analysis_signals_json = ? WHERE id = ?').run(json, video.id)
+      expect(repos.videos.get(video.id)!.analysis.signals, json).toBeNull()
+    }
   })
 
   it('lets explicit fields win over the status defaults', () => {
@@ -337,6 +409,96 @@ describe('highlights', () => {
     repos.highlights.deleteByVideo(video.id)
     expect(repos.highlights.listByVideo(video.id)).toEqual([])
     expect(repos.highlights.listByVideo(other.id)).toHaveLength(1)
+  })
+})
+
+describe('highlights kept by a new Analysis', () => {
+  function add(videoId: string, start: number, end: number, status: HighlightStatus, origin: HighlightOrigin): Highlight {
+    return repos.highlights.insert({
+      videoId, start, end, status, origin, score: origin === 'analysis' ? 0.5 : null, reason: origin === 'analysis' ? '舊的理由' : null,
+    })
+  }
+
+  function exportClip(h: Highlight) {
+    return repos.clips.insert({ videoId: h.videoId, highlightId: h.id, start: h.start, end: h.end, layout: 'original', burnSubtitles: true })
+  }
+
+  it('isKeptOnReanalysis replaces only analysis candidates without clips', () => {
+    expect(isKeptOnReanalysis({ origin: 'analysis', status: 'candidate' }, false)).toBe(false)
+    expect(isKeptOnReanalysis({ origin: 'analysis', status: 'candidate' }, true)).toBe(true)
+    for (const status of ['selected', 'dismissed'] as const) {
+      expect(isKeptOnReanalysis({ origin: 'analysis', status }, false)).toBe(true)
+    }
+    for (const status of ['candidate', 'selected', 'dismissed'] as const) {
+      expect(isKeptOnReanalysis({ origin: 'manual', status }, false)).toBe(true)
+    }
+  })
+
+  it('listKept and replaceAnalysisCandidates apply the same rule as isKeptOnReanalysis', () => {
+    const video = repos.videos.insert(newVideo())
+    const all: Array<{ h: Highlight, clips: boolean }> = []
+    let t = 0
+    for (const origin of ['analysis', 'manual'] as const) {
+      for (const status of ['candidate', 'selected', 'dismissed'] as const) {
+        for (const clips of [false, true]) {
+          const h = add(video.id, t, t + 5, status, origin)
+          if (clips) exportClip(h)
+          all.push({ h, clips })
+          t += 10
+        }
+      }
+    }
+    const expected = all.filter(({ h, clips }) => isKeptOnReanalysis(h, clips)).map(({ h }) => h.id)
+    expect(repos.highlights.listKept(video.id).map(h => h.id)).toEqual(expected)
+    expect(expected).toHaveLength(all.length - 1)
+    repos.highlights.replaceAnalysisCandidates(video.id, [])
+    expect(repos.highlights.listByVideo(video.id).map(h => h.id)).toEqual(expected)
+  })
+
+  it('replaces old candidates, keeps decided / manual / exported ones and never overlaps them', () => {
+    at('2026-01-01T00:00:00.000Z')
+    const video = repos.videos.insert(newVideo())
+    const other = repos.videos.insert(newVideo({ title: 'other' }))
+    const oldCandidate = add(video.id, 0, 20, 'candidate', 'analysis')
+    const selected = add(video.id, 30, 50, 'selected', 'analysis')
+    const dismissed = add(video.id, 60, 80, 'dismissed', 'analysis')
+    const manual = add(video.id, 90, 100, 'selected', 'manual')
+    const exported = add(video.id, 110, 130, 'candidate', 'analysis')
+    const clip = exportClip(exported)
+    const otherCandidate = add(other.id, 0, 20, 'candidate', 'analysis')
+
+    at('2026-01-02T00:00:00.000Z')
+    const inserted = repos.highlights.replaceAnalysisCandidates(video.id, [
+      { start: 140, end: 160, score: 0.9, reason: '後面' },
+      { start: 2, end: 18, score: 0.8, reason: '大家笑成一團' },
+      { start: 45, end: 58, score: 0.7, reason: '和選用的重疊' },
+      { start: 79.5, end: 89, score: 0.6, reason: '和捨棄的重疊' },
+      { start: 100, end: 110, score: 0.5, reason: '剛好接在兩段中間' },
+      { start: 150, end: 170, score: 0.4, reason: '和新的候選重疊' },
+      { start: 175, end: 175, score: 0.4, reason: '沒有長度' },
+    ])
+    expect(inserted.map(h => [h.start, h.end, h.score, h.reason])).toEqual([
+      [2, 18, 0.8, '大家笑成一團'],
+      [100, 110, 0.5, '剛好接在兩段中間'],
+      [140, 160, 0.9, '後面'],
+    ])
+    expect(inserted.every(h => h.origin === 'analysis' && h.status === 'candidate' && h.createdAt === '2026-01-02T00:00:00.000Z')).toBe(true)
+    const ids = repos.highlights.listByVideo(video.id).map(h => h.id)
+    expect(ids).not.toContain(oldCandidate.id)
+    expect(ids).toEqual(expect.arrayContaining([selected.id, dismissed.id, manual.id, exported.id, ...inserted.map(h => h.id)]))
+    expect(ids).toHaveLength(7)
+    expect(repos.clips.get(clip.id)).not.toBeNull()
+    expect(repos.highlights.get(otherCandidate.id)).not.toBeNull()
+  })
+
+  it('leaves everything as it was when the insert fails half-way', () => {
+    const video = repos.videos.insert(newVideo())
+    const old = add(video.id, 0, 20, 'candidate', 'analysis')
+    const bad = [{ start: 30, end: 40, score: 0.5, reason: 'ok' }, { start: 50, end: 60, score: 0.5, reason: null as unknown as string }]
+    db.exec(`CREATE TRIGGER no_null_reason BEFORE INSERT ON highlights WHEN NEW.origin = 'analysis' AND NEW.reason IS NULL
+      BEGIN SELECT RAISE(ABORT, 'reason required'); END`)
+    expect(() => repos.highlights.replaceAnalysisCandidates(video.id, bad)).toThrow('reason required')
+    expect(repos.highlights.listByVideo(video.id).map(h => h.id)).toEqual([old.id])
   })
 })
 

@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import type { Highlight } from '~~/shared/types/domain'
+import type { Highlight, SignalState } from '~~/shared/types/domain'
 import type { HighlightEditDraft } from '~/types/highlight-edit'
-import { countHighlights, filterHighlights, type HighlightFilter } from '~/utils/highlights'
-import { highlightStatusLabels } from '~/utils/labels'
+import { summarizeSignals } from '~/utils/analysis'
+import { countHighlights, emptyListText, emptyTabText, highlightsForTab, type HighlightFilter } from '~/utils/highlights'
 
 const props = defineProps<{
   highlights: Highlight[]
@@ -12,6 +12,10 @@ const props = defineProps<{
   canPreview: boolean
   focusedId: string | null
   clipCounts: Record<string, number>
+  /** Signals of the last run that found candidates; null before any (milestone 1 videos). */
+  signals: SignalState[] | null
+  /** A highlights-only run is queued or running. */
+  analysisActive: boolean
 }>()
 
 const editing = defineModel<HighlightEditDraft | null>('editing', { default: null })
@@ -32,12 +36,17 @@ const stopAtEnd = ref(true)
 const counts = computed(() => countHighlights(props.highlights))
 const tabs = computed(() => [
   { label: '全部', value: 'all', badge: counts.value.all },
-  { label: '選用', value: 'selected', badge: counts.value.selected },
   { label: '候選', value: 'candidate', badge: counts.value.candidate },
+  { label: '選用', value: 'selected', badge: counts.value.selected },
   { label: '捨棄', value: 'dismissed', badge: counts.value.dismissed },
 ])
-const shown = computed(() => filterHighlights(props.highlights, activeFilter.value))
-const filterLabel = computed(() => (activeFilter.value === 'all' ? '' : highlightStatusLabels[activeFilter.value]))
+// 候選 by Highlight Score (best first); the other tabs by start
+const shown = computed(() => highlightsForTab(props.highlights, activeFilter.value))
+
+const listState = computed(() => ({ analysisRan: props.signals !== null, analysisActive: props.analysisActive }))
+const emptyList = computed(() => emptyListText(listState.value))
+const emptyTab = computed(() => (activeFilter.value === 'all' ? '' : emptyTabText(activeFilter.value, props.highlights, listState.value)))
+const signalSummary = computed(() => summarizeSignals(props.signals))
 
 function startEdit(h: Highlight) {
   editing.value = { id: h.id, start: h.start, end: h.end }
@@ -52,6 +61,23 @@ function startEdit(h: Highlight) {
         精華片段
       </h2>
       <USwitch v-model="stopAtEnd" label="播放到終點自動停止" size="sm" />
+    </div>
+
+    <div v-if="signalSummary" class="mb-3 space-y-1 text-sm" data-testid="signal-summary">
+      <p class="flex items-start gap-1.5 text-muted">
+        <UIcon name="i-lucide-audio-waveform" class="mt-0.5 size-4 shrink-0" />
+        <span>這次的候選依據：<span class="font-medium text-toned">{{ signalSummary.used || '沒有可用的訊號' }}</span></span>
+      </p>
+      <p
+        v-for="note in signalSummary.notes"
+        :key="note.kind"
+        class="flex items-start gap-1.5"
+        :class="note.missing ? 'text-warning' : 'text-muted'"
+      >
+        <UIcon v-if="note.missing" name="i-lucide-triangle-alert" class="mt-0.5 size-4 shrink-0" />
+        <UIcon v-else name="i-lucide-info" class="mt-0.5 size-4 shrink-0" />
+        <span>{{ note.text }}</span>
+      </p>
     </div>
 
     <UTabs
@@ -80,15 +106,15 @@ function startEdit(h: Highlight) {
 
     <UEmpty
       v-else-if="!highlights.length"
-      icon="i-lucide-scissors"
-      title="還沒有精華片段"
-      description="用上方的起點／終點標出想剪的段落；點逐字稿的時間可以快速跳到那裡。"
+      :icon="analysisActive ? 'i-lucide-hourglass' : 'i-lucide-scissors'"
+      :title="emptyList.title"
+      :description="emptyList.description"
       variant="naked"
       size="sm"
     />
 
     <p v-else-if="!shown.length" class="py-6 text-center text-sm text-muted">
-      沒有「{{ filterLabel }}」的精華片段
+      {{ emptyTab }}
     </p>
 
     <ul v-else class="space-y-2">

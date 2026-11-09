@@ -43,7 +43,7 @@ const activeCount = computed(() => videos.value.filter(isAnalysisActive).length)
             共 {{ videos.length }} 支影片<template v-if="activeCount">，{{ activeCount }} 支正在分析或排隊</template>
           </template>
           <template v-else>
-            加入影片後會在背景分析，產生可編輯的逐字稿。
+            加入影片後會在背景分析，產生可編輯的逐字稿與候選精華片段。
           </template>
         </p>
       </div>
@@ -68,7 +68,7 @@ const activeCount = computed(() => videos.value.filter(isAnalysisActive).length)
       v-else-if="!videos.length"
       icon="i-lucide-film"
       title="影片庫還是空的"
-      description="從影片資料夾挑選 OBS 錄影檔，或直接上傳影片。分析完成後就能修改逐字稿、標出精華片段並輸出帶字幕的剪輯。"
+      description="從影片資料夾挑選 OBS 錄影檔，或直接上傳影片。分析完成後就能修改逐字稿、挑選自動找到的候選精華片段，並輸出帶字幕的剪輯。"
       variant="subtle"
       size="lg"
       :actions="[{ label: '加入影片', icon: 'i-lucide-plus', onClick: () => { addOpen = true } }]"

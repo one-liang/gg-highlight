@@ -74,7 +74,7 @@ async function runToEnd(queue: AnalysisQueue) {
 }
 
 describe('AnalysisQueue: happy path', () => {
-  it('runs probe → extract-audio → transcribe → prepare-preview and stores the results (mkv → remuxed preview)', async () => {
+  it('runs probe → extract-audio → transcribe → prepare-preview → signals → candidates and stores the results (mkv → remuxed preview)', async () => {
     const writes = recordAnalysisWrites()
     const video = addVideo(fx.sampleEnMkv, { audioTrack: 1, language: 'en' })
     const queue = makeQueue('ok', { progressIntervalMs: 0 })
@@ -111,11 +111,14 @@ describe('AnalysisQueue: happy path', () => {
 
     const mine = writes.filter(w => w.id === video.id)
     const steps = [...new Set(mine.map(w => w.patch.step).filter(s => s))]
-    expect(steps).toEqual(['probe', 'extract-audio', 'transcribe', 'prepare-preview'])
+    expect(steps).toEqual(['probe', 'extract-audio', 'transcribe', 'prepare-preview', 'signals', 'candidates'])
     const progress = mine.map(w => w.patch.progress).filter((p): p is number => typeof p === 'number')
     expect([...progress].sort((a, b) => a - b)).toEqual(progress)
-    // Inside transcribe (10 %–85 %) the fake reports 0.1…1.0.
-    expect(progress.some(p => p > 0.1 && p < 0.85)).toBe(true)
+    // Inside transcribe (7 %–67 %) the fake reports 0.1…1.0.
+    expect(progress.some(p => p > 0.07 && p < 0.67)).toBe(true)
+    // Ollama is off in these tests: loudness only, never a real Ollama.
+    expect(done.analysis).toMatchObject({ mode: 'full', version: 2 })
+    expect(done.analysis.signals?.map(s => `${s.kind}:${s.status}`)).toEqual(['loudness:used', 'transcript:missing'])
     expect(logs.join('\n')).toContain('使用 CPU 執行語音辨識')
   })
 
@@ -296,7 +299,7 @@ describe('AnalysisQueue: cancel, stop and recover', () => {
     await queue.cancel('unknown-id')
   })
 
-  it('stop() during a run leaves it running; recover() + start() redo it from the beginning', async () => {
+  it('stop() during a run leaves it running; recover() + start() redo it from the beginning in the same mode', async () => {
     const pidFile = path.join(env.dataDir, 'pid.json')
     process.env.GG_FAKE_PID_FILE = pidFile
     let pid = 0
@@ -321,14 +324,16 @@ describe('AnalysisQueue: cancel, stop and recover', () => {
     const files = analysisFiles(env, video.id)
     await fsp.writeFile(files.audio, 'x')
     await fsp.writeFile(path.join(files.dir, 'preview.tmp-1234.mp4'), 'x')
+    await fsp.writeFile(path.join(files.dir, 'signals.tmp-1234.json'), 'x')
 
     const queue = makeQueue()
     const recovered = await queue.recover()
     expect(recovered).toEqual([video.id])
     const requeued = env.repos.videos.get(video.id)!
-    expect(requeued.analysis).toMatchObject({ status: 'queued', step: null, progress: 0, error: null })
-    expect(env.repos.transcript.list(video.id)).toEqual([])
-    expect(fs.readdirSync(files.dir).filter(n => n.startsWith('audio.') || n.startsWith('preview.tmp-'))).toEqual([])
+    expect(requeued.analysis).toMatchObject({ status: 'queued', mode: 'full', step: null, progress: 0, error: null })
+    // The transcript stays until the re-run's transcribe step replaces it.
+    expect(env.repos.transcript.list(video.id).map(s => s.text)).toEqual(['partial'])
+    expect(fs.readdirSync(files.dir).filter(n => /^(?:audio\.|preview\.tmp-|signals\.tmp-)/.test(n))).toEqual([])
 
     await runToEnd(queue)
     const done = env.repos.videos.get(video.id)!

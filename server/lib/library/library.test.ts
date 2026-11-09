@@ -39,7 +39,7 @@ function record(overrides: Partial<VideoRecord> = {}): VideoRecord {
     language: 'zh',
     audioTrack: 0,
     media: null,
-    analysis: { status: 'done', step: null, progress: 1, error: null, startedAt: null, finishedAt: null },
+    analysis: { status: 'done', mode: 'full', version: 2, signals: null, step: null, progress: 1, error: null, startedAt: null, finishedAt: null },
     previewPath: null,
     createdAt: '2026-01-01T00:00:00.000Z',
     ...overrides,

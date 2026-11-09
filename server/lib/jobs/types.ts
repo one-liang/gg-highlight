@@ -14,6 +14,8 @@ export interface JobDeps {
   log: (message: string) => void
   /** Minimum time between two progress writes to the database. Default 250 ms. */
   progressIntervalMs?: number
+  /** HTTP client for Ollama (config.ollama); tests may inject one. Defaults to globalThis.fetch. */
+  fetch?: typeof fetch
 }
 
 export type JobDepsInput = Omit<JobDeps, 'transcriberCommand' | 'now' | 'log'> & Partial<Pick<JobDeps, 'transcriberCommand' | 'now' | 'log'>>

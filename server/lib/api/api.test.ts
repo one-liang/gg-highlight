@@ -1,11 +1,16 @@
 import fsp from 'node:fs/promises'
+import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { H3Error } from 'h3'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import type { AnalysisMode, AnalysisStatus } from '../../../shared/types/domain'
+import { startFakeOllama } from '../llm/test-helpers/fake-ollama.mjs'
 import {
-  addVideoSchema, allowedMethods, asHttpError, checkHighlightRange, clipDownloadName, createClipSchema, END_SLACK_SECONDS, fileNameClock, httpError, isHttpError,
-  normalizeWatchFolders, parseIndexParam, parseWith, safeFileNamePart, settingsSchema, titleFromFileName, unreadableVideo,
+  addVideoSchema, allowedMethods, asHttpError, checkHighlightRange, checkReanalyze, clipDownloadName, createClipSchema, END_SLACK_SECONDS, fileNameClock,
+  httpError, isHttpError, normalizeWatchFolders, NOT_READY_MESSAGES, ollamaInfo, parseIndexParam, parseWith, reanalyzeSchema,
+  REANALYZE_BUSY_MESSAGE, REANALYZE_CLIPS_BUSY_MESSAGE, REANALYZE_MISSING_SOURCE_MESSAGE, REANALYZE_NO_TRANSCRIPT_MESSAGE,
+  requireTranscriptReady, safeFileNamePart, settingsSchema, titleFromFileName, transcriptReady, unreadableVideo,
   updateHighlightSchema, updateSegmentSchema,
 } from '.'
 
@@ -199,5 +204,96 @@ describe('normalizeWatchFolders', () => {
     expect(await statusOfAsync(() => normalizeWatchFolders([missing]))).toEqual({ statusCode: 400, statusMessage: `找不到資料夾「${missing}」` })
     const file = path.join(tmp, 'file.mp4')
     expect(await statusOfAsync(() => normalizeWatchFolders([file]))).toEqual({ statusCode: 400, statusMessage: `「${file}」不是資料夾` })
+  })
+})
+
+describe('re-analysis rules', () => {
+  const video = (status: AnalysisStatus, mode: AnalysisMode) => ({ analysis: { status, mode } })
+  const statuses: AnalysisStatus[] = ['queued', 'running', 'done', 'failed']
+
+  it('transcriptReady: a done Analysis, or any highlights-only run', () => {
+    for (const status of statuses) {
+      expect(transcriptReady(video(status, 'highlights')), status).toBe(true)
+      expect(transcriptReady(video(status, 'full')), status).toBe(status === 'done')
+    }
+  })
+
+  it('requireTranscriptReady answers a 409 with the route\'s message', () => {
+    expect(() => requireTranscriptReady(video('done', 'full'), 'export')).not.toThrow()
+    expect(() => requireTranscriptReady(video('failed', 'highlights'), 'editTranscript')).not.toThrow()
+    for (const action of Object.keys(NOT_READY_MESSAGES) as Array<keyof typeof NOT_READY_MESSAGES>) {
+      expect(statusOf(() => requireTranscriptReady(video('running', 'full'), action))).toEqual({ statusCode: 409, statusMessage: NOT_READY_MESSAGES[action] })
+    }
+    expect(NOT_READY_MESSAGES.export).toBe('影片分析完成後才能輸出剪輯')
+  })
+
+  it('checkReanalyze: 409 while queued or running, for highlights without a Transcript, for full with clips exporting; 422 for full without the source', () => {
+    const ok = { activeClips: 0, sourceExists: true }
+    for (const mode of ['full', 'highlights'] as const) {
+      for (const status of ['queued', 'running'] as const) {
+        for (const current of ['full', 'highlights'] as const) {
+          expect(statusOf(() => checkReanalyze(video(status, current), mode, ok))).toEqual({ statusCode: 409, statusMessage: REANALYZE_BUSY_MESSAGE })
+        }
+      }
+    }
+    expect(() => checkReanalyze(video('done', 'full'), 'highlights', ok)).not.toThrow()
+    expect(() => checkReanalyze(video('failed', 'highlights'), 'highlights', ok)).not.toThrow()
+    expect(statusOf(() => checkReanalyze(video('failed', 'full'), 'highlights', ok))).toEqual({ statusCode: 409, statusMessage: REANALYZE_NO_TRANSCRIPT_MESSAGE })
+    // highlights-only does not need the source file (the loudness is then missing) and ignores clips
+    expect(() => checkReanalyze(video('done', 'full'), 'highlights', { activeClips: 2, sourceExists: false })).not.toThrow()
+
+    expect(() => checkReanalyze(video('done', 'full'), 'full', ok)).not.toThrow()
+    expect(() => checkReanalyze(video('failed', 'full'), 'full', ok)).not.toThrow()
+    expect(() => checkReanalyze(video('failed', 'highlights'), 'full', ok)).not.toThrow()
+    expect(statusOf(() => checkReanalyze(video('done', 'full'), 'full', { activeClips: 1, sourceExists: true }))).toEqual({ statusCode: 409, statusMessage: REANALYZE_CLIPS_BUSY_MESSAGE })
+    expect(statusOf(() => checkReanalyze(video('done', 'highlights'), 'full', { activeClips: 0, sourceExists: false }))).toEqual({ statusCode: 422, statusMessage: REANALYZE_MISSING_SOURCE_MESSAGE })
+  })
+
+  it('reanalyzeSchema takes full or highlights', () => {
+    expect(parseWith(reanalyzeSchema, { mode: 'full' })).toEqual({ mode: 'full' })
+    expect(parseWith(reanalyzeSchema, { mode: 'highlights' })).toEqual({ mode: 'highlights' })
+    for (const bad of [{}, { mode: 'all' }, { mode: 1 }]) {
+      expect(statusOf(() => parseWith(reanalyzeSchema, bad)).statusMessage).toBe('重新分析的方式必須是 full（重新辨識語音並找精華）或 highlights（只重新找精華片段）')
+    }
+    expect(statusOf(() => parseWith(reanalyzeSchema, null)).statusCode).toBe(400)
+  })
+})
+
+describe('ollamaInfo (GET /api/system)', () => {
+  it('reports ready, model-missing and outdated from the fake Ollama, and disabled without a request', async () => {
+    const fake = await startFakeOllama({ version: '0.40.15' })
+    try {
+      const config = { url: fake.url, model: 'qwen3.5:9b' }
+      expect(await ollamaInfo(config)).toEqual({ url: fake.url, model: 'qwen3.5:9b', status: 'ready', version: '0.40.15' })
+      fake.setScenario('model-missing')
+      expect(await ollamaInfo(config)).toMatchObject({ status: 'model-missing', version: '0.40.15' })
+      fake.setScenario('old-version')
+      expect(await ollamaInfo(config)).toMatchObject({ status: 'outdated', version: '0.20.0' })
+      fake.requests.length = 0
+      expect(await ollamaInfo({ url: null, model: 'qwen3.5:9b' })).toEqual({ url: null, model: 'qwen3.5:9b', status: 'disabled', version: null })
+      expect(fake.requests).toEqual([])
+    }
+    finally {
+      await fake.close()
+    }
+  })
+
+  it('is unreachable, within the timeout, when nothing answers or the port is closed', async () => {
+    // accepts connections but never answers
+    const silent = net.createServer(() => {})
+    await new Promise<void>(resolve => silent.listen(0, '127.0.0.1', resolve))
+    const { port } = silent.address() as net.AddressInfo
+    try {
+      const started = Date.now()
+      expect(await ollamaInfo({ url: `http://127.0.0.1:${port}`, model: 'm' }, { timeoutMs: 300 })).toEqual({
+        url: `http://127.0.0.1:${port}`, model: 'm', status: 'unreachable', version: null,
+      })
+      expect(Date.now() - started).toBeLessThan(2000)
+    }
+    finally {
+      silent.close()
+    }
+    expect((await ollamaInfo({ url: `http://127.0.0.1:${port}`, model: 'm' })).status).toBe('unreachable')
+    expect((await ollamaInfo({ url: 'http://127.0.0.1:1', model: 'm' }, { fetch: () => Promise.reject(new Error('boom')) })).status).toBe('unreachable')
   })
 })

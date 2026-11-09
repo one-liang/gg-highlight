@@ -23,6 +23,19 @@ def _num(value: Any, digits: int = 3) -> float:
     return round(x, digits) if math.isfinite(x) else 0.0
 
 
+def _optional_num(value: Any, digits: int) -> float | None:
+    """Like _num, but None (left out of the JSON) when the value is missing or not a finite number."""
+    try:
+        x = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(x, digits) if math.isfinite(x) else None
+
+
+# Segment confidence measures the server's transcript cleanup reads (RawSegment in protocol.ts).
+CONFIDENCE_FIELDS = (('avgLogprob', 'avg_logprob'), ('noSpeechProb', 'no_speech_prob'), ('compressionRatio', 'compression_ratio'))
+
+
 def segment_to_dict(segment: Any) -> dict[str, Any]:
     words = [
         {
@@ -33,12 +46,17 @@ def segment_to_dict(segment: Any) -> dict[str, Any]:
         }
         for w in (segment.words or [])
     ]
-    return {
+    out = {
         'start': _num(segment.start),
         'end': _num(segment.end),
         'text': (segment.text or '').strip(),
         'words': words,
     }
+    for key, attr in CONFIDENCE_FIELDS:
+        value = _optional_num(getattr(segment, attr, None), 4)
+        if value is not None:
+            out[key] = value
+    return out
 
 
 def transcribe_options(language: str, initial_prompt: str | None) -> dict[str, Any]:

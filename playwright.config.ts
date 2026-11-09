@@ -1,6 +1,8 @@
 // End-to-end tests through the real browser UI: `pnpm test:e2e`.
 // The webServer builds the app when the sources changed, then runs the production server on a free
-// port with a fresh data folder, the tiny ASR model on CPU and libx264.
+// port with a fresh data folder, the tiny ASR model on CPU and libx264. A fake Ollama
+// (server/lib/llm/test-helpers/fake-ollama.mjs, scenario 'ok') stands in for the local LLM; specs
+// switch its scenario with POST $GG_E2E_OLLAMA_URL/__scenario.
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -14,10 +16,18 @@ function freePortSync(): number {
   return Number(execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' }))
 }
 process.env.GG_E2E_PORT ??= String(freePortSync())
+if (!process.env.GG_E2E_OLLAMA_PORT) {
+  let ollamaPort = freePortSync()
+  while (String(ollamaPort) === process.env.GG_E2E_PORT) ollamaPort = freePortSync()
+  process.env.GG_E2E_OLLAMA_PORT = String(ollamaPort)
+}
 process.env.GG_E2E_DATA_DIR ??= fs.mkdtempSync(path.join(os.tmpdir(), 'gg-e2e-'))
 
 const port = Number(process.env.GG_E2E_PORT)
 const baseURL = `http://127.0.0.1:${port}`
+const ollamaPort = Number(process.env.GG_E2E_OLLAMA_PORT)
+const ollamaUrl = `http://127.0.0.1:${ollamaPort}`
+process.env.GG_E2E_OLLAMA_URL = ollamaUrl
 
 export default defineConfig({
   testDir: 'tests/e2e',
@@ -46,7 +56,15 @@ export default defineConfig({
     },
   },
   projects: [{ name: 'chromium', use: { browserName: 'chromium' } }],
-  webServer: {
+  webServer: [{
+    // never a developer's real Ollama: e2e runs must not depend on (or load) a 6.6 GB model
+    command: `node server/lib/llm/test-helpers/fake-ollama.mjs --port ${ollamaPort} --scenario ok`,
+    url: `${ollamaUrl}/api/version`,
+    reuseExistingServer: false,
+    timeout: 30_000,
+    stdout: 'ignore',
+    stderr: 'pipe',
+  }, {
     command: 'node tests/e2e/server.mjs',
     url: `${baseURL}/api/system`,
     reuseExistingServer: false,
@@ -62,6 +80,8 @@ export default defineConfig({
       GG_ASR_MODEL_EN: 'Systran/faster-whisper-tiny',
       GG_ASR_DEVICE: 'cpu',
       GG_VIDEO_ENCODER: 'libx264',
+      GG_OLLAMA_URL: ollamaUrl,
+      GG_OLLAMA_MODEL: 'qwen3.5:9b',
     },
-  },
+  }],
 })

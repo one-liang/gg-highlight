@@ -32,6 +32,12 @@ export interface RawSegment {
   end: number
   text: string
   words: RawWord[]
+  /** faster-whisper's decoding confidence for the segment (mean token log probability). Missing in older files. */
+  avgLogprob?: number
+  /** Probability that the segment's window holds no speech. Missing in older files. */
+  noSpeechProb?: number
+  /** gzip compression ratio of the text; a high value usually means a repetition loop. Missing in older files. */
+  compressionRatio?: number
 }
 
 export interface RawTranscript {

@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import type { Highlight, HighlightStatus } from '../../shared/types/domain'
+import type { Highlight, HighlightOrigin, HighlightStatus } from '../../shared/types/domain'
 import { formatDuration, formatTime, parseTime } from './time'
 import {
   countHighlights,
+  emptyListText,
+  emptyTabText,
   END_SLACK_SECONDS,
   filterHighlights,
+  highlightsForTab,
   isOverShortsLimit,
+  sortByScore,
   sortHighlights,
   statusActionLabels,
   statusTransitions,
@@ -42,6 +46,65 @@ describe('ordering and filtering', () => {
     const moved = upsertHighlight(added, h('d', 50, 60))
     expect(moved.map(x => x.id)).toEqual(['b', 'a', 'c', 'd'])
     expect(moved).toHaveLength(4)
+  })
+})
+
+function scored(id: string, start: number, score: number | null, status: HighlightStatus = 'candidate', origin: HighlightOrigin = 'analysis'): Highlight {
+  return { ...h(id, start, start + 20, status), origin, score, reason: score === null ? null : '理由' }
+}
+
+describe('tabs', () => {
+  const list = [
+    scored('low', 10, 0.41),
+    scored('manual', 5, null, 'selected', 'manual'),
+    scored('top', 300, 0.92),
+    scored('mid-late', 200, 0.7),
+    scored('mid-early', 100, 0.7),
+    scored('picked', 50, 0.88, 'selected'),
+    scored('dropped', 20, 0.95, 'dismissed'),
+  ]
+
+  it('sorts by Highlight Score, best first; equal scores by start; scoreless last', () => {
+    expect(sortByScore(list).map(x => x.id)).toEqual(['dropped', 'top', 'picked', 'mid-early', 'mid-late', 'low', 'manual'])
+    expect(list[0]!.id).toBe('low')
+  })
+
+  it('orders the 候選 tab by Highlight Score and the other tabs by start', () => {
+    expect(highlightsForTab(list, 'candidate').map(x => x.id)).toEqual(['top', 'mid-early', 'mid-late', 'low'])
+    expect(highlightsForTab(list, 'all').map(x => x.id)).toEqual(['manual', 'low', 'dropped', 'picked', 'mid-early', 'mid-late', 'top'])
+    expect(highlightsForTab(list, 'selected').map(x => x.id)).toEqual(['manual', 'picked'])
+    expect(highlightsForTab(list, 'dismissed').map(x => x.id)).toEqual(['dropped'])
+  })
+})
+
+describe('empty states', () => {
+  const idle = { analysisRan: false, analysisActive: false }
+  const ran = { analysisRan: true, analysisActive: false }
+  const active = { analysisRan: true, analysisActive: true }
+
+  it('explains an empty list', () => {
+    expect(emptyListText(idle).title).toBe('還沒有精華片段')
+    expect(emptyListText(idle).description).toContain('起點／終點')
+    // the analysis ran its candidates step and found nothing
+    expect(emptyListText(ran).title).toBe('這次分析沒有找到候選精華片段')
+    expect(emptyListText(ran).description).toContain('自己用上方的起點／終點')
+    // a highlights-only run is still going
+    expect(emptyListText(active).title).toBe('正在找精華片段')
+  })
+
+  it('explains an empty 候選 tab when the analysis found nothing', () => {
+    const manualOnly = [scored('m', 5, null, 'selected', 'manual')]
+    expect(emptyTabText('candidate', manualOnly, ran)).toBe('這次分析沒有找到候選精華片段')
+    expect(emptyTabText('candidate', manualOnly, active)).toBe('正在找精華片段，完成後候選會出現在這裡')
+    // a milestone-1 video never had candidates
+    expect(emptyTabText('candidate', manualOnly, idle)).toBe('沒有「候選」的精華片段')
+  })
+
+  it('names the tab when its Highlights were all moved elsewhere', () => {
+    const decided = [scored('a', 5, 0.8, 'selected'), scored('b', 50, 0.6, 'dismissed')]
+    expect(emptyTabText('candidate', decided, ran)).toBe('沒有「候選」的精華片段')
+    expect(emptyTabText('selected', [scored('c', 5, 0.8)], ran)).toBe('沒有「選用」的精華片段')
+    expect(emptyTabText('dismissed', [scored('c', 5, 0.8)], ran)).toBe('沒有「捨棄」的精華片段')
   })
 })
 

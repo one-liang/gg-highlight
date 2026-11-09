@@ -1,5 +1,5 @@
 // Local LLM (Ollama) contract for the transcript Signal (design.md「逐字稿」, ADR-0002).
-import type { OllamaStatus, SignalState } from '../../../shared/types/domain'
+import type { Language, OllamaStatus, SignalState } from '../../../shared/types/domain'
 import type { TranscriptMoment } from '../signals/types'
 
 export const DEFAULT_OLLAMA_URL = 'http://127.0.0.1:11434'
@@ -38,6 +38,10 @@ export interface ReadTranscriptOptions {
   /** Fraction of chunks done, 0–1. */
   onProgress?: (fraction: number) => void
   log?: (message: string) => void
+  /** Spoken language of the video; an English Transcript gets a note in the prompt. */
+  language?: Language
   /** Injected for tests; defaults to globalThis.fetch. */
   fetch?: typeof fetch
+  /** Per-request timeout of one chunk; defaults to 10 minutes (tests shorten it). */
+  chunkTimeoutMs?: number
 }

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import type { SourceVideo } from '~~/shared/types/domain'
+import { analysisProgressText } from '~/utils/analysis'
 import { progressPercent } from '~/utils/format'
-import { analysisStepLabel, analysisStepLabels, analysisStepsFor, analysisStepState } from '~/utils/labels'
+import { analysisStepLabels, analysisStepsFor, analysisStepState } from '~/utils/labels'
 
 const props = defineProps<{ video: SourceVideo }>()
 
@@ -13,16 +14,7 @@ const steps = computed(() => analysisStepsFor(props.video).map(step => ({
   label: analysisStepLabels[step],
   state: analysisStepState(step, analysis.value.step, analysis.value.status),
 })))
-const title = computed(() => {
-  if (queued.value) return '排隊等待分析'
-  const label = analysisStepLabel(analysis.value.step)
-  return label ? `正在${label}` : '分析中'
-})
-const hint = computed(() => {
-  if (queued.value) return '一次只分析一支影片，前面的影片完成後就會自動開始。'
-  if (analysis.value.step === 'transcribe') return '語音辨識最花時間，長影片可能需要數分鐘到數十分鐘。'
-  return '完成後就能看逐字稿、標出精華片段並輸出剪輯。'
-})
+const text = computed(() => analysisProgressText(props.video))
 </script>
 
 <template>
@@ -34,10 +26,10 @@ const hint = computed(() => {
       </span>
       <div class="min-w-0 flex-1">
         <p class="font-semibold text-highlighted">
-          {{ title }}
+          {{ text.title }}
         </p>
         <p class="mt-0.5 text-sm text-muted">
-          {{ hint }}
+          {{ text.hint }}
         </p>
       </div>
       <span v-if="!queued" class="text-2xl font-semibold tabular-nums text-highlighted">{{ percent }}%</span>
@@ -54,9 +46,9 @@ const hint = computed(() => {
       </li>
     </ol>
 
-    <p class="mt-5 flex items-center gap-1.5 border-t border-default pt-4 text-sm text-muted">
-      <UIcon name="i-lucide-info" class="size-4 shrink-0" />
-      分析在背景進行，可以關掉這個頁面，稍後再回來查看。
+    <p class="mt-5 flex items-start gap-1.5 border-t border-default pt-4 text-sm text-muted">
+      <UIcon name="i-lucide-info" class="mt-0.5 size-4 shrink-0" />
+      {{ text.footer }}
     </p>
   </section>
 </template>

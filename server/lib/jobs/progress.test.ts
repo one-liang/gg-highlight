@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ANALYSIS_STEPS } from './analysis'
+import { ANALYSIS_STEPS, SIGNALS_STEP_SHARES } from './analysis'
 import { createStepProgress, createThrottledProgress } from './progress'
 
 function clock(start = 0) {
@@ -38,13 +38,19 @@ describe('createThrottledProgress', () => {
 })
 
 describe('createStepProgress', () => {
-  it('weights the analysis steps 2/8/75/15 %', () => {
-    expect(ANALYSIS_STEPS.map(([, w]) => w)).toEqual([0.02, 0.08, 0.75, 0.15])
-    expect(ANALYSIS_STEPS.reduce((sum, [, w]) => sum + w, 0)).toBeCloseTo(1)
+  it('weights the full analysis steps 2/5/60/10/21/2 % and the highlights-only steps 10/85/5 %', () => {
+    expect(ANALYSIS_STEPS.full).toEqual([
+      ['probe', 0.02], ['extract-audio', 0.05], ['transcribe', 0.6], ['prepare-preview', 0.1], ['signals', 0.21], ['candidates', 0.02],
+    ])
+    expect(ANALYSIS_STEPS.highlights).toEqual([['extract-audio', 0.1], ['signals', 0.85], ['candidates', 0.05]])
+    for (const steps of Object.values(ANALYSIS_STEPS)) {
+      expect(steps.reduce((sum, [, w]) => sum + w, 0)).toBeCloseTo(1)
+    }
+    expect(SIGNALS_STEP_SHARES.loudness + SIGNALS_STEP_SHARES.transcript).toBeCloseTo(1)
 
     const c = clock()
     const writes: Array<[string, number]> = []
-    const p = createStepProgress(ANALYSIS_STEPS, (step, v) => writes.push([step, v]), c.now, 250)
+    const p = createStepProgress(ANALYSIS_STEPS.full, (step, v) => writes.push([step, v]), c.now, 250)
     p.update(0.5)
     expect(writes).toEqual([['probe', 0.01]])
     p.step('extract-audio')
@@ -53,25 +59,41 @@ describe('createStepProgress', () => {
     // Throttled (same instant), the step write already happened.
     expect(writes.at(-1)).toEqual(['extract-audio', 0.02])
     p.step('transcribe')
-    expect(writes.at(-1)).toEqual(['transcribe', 0.1])
+    expect(writes.at(-1)).toEqual(['transcribe', 0.07])
     c.advance(1000)
     p.update(0.5)
-    expect(writes.at(-1)).toEqual(['transcribe', 0.475])
+    expect(writes.at(-1)).toEqual(['transcribe', 0.37])
     p.step('prepare-preview')
-    expect(writes.at(-1)).toEqual(['prepare-preview', 0.85])
+    expect(writes.at(-1)).toEqual(['prepare-preview', 0.67])
+    p.step('signals')
+    expect(writes.at(-1)).toEqual(['signals', 0.77])
+    c.advance(1000)
+    p.update(0.5)
+    expect(writes.at(-1)).toEqual(['signals', 0.875])
+    p.step('candidates')
+    expect(writes.at(-1)).toEqual(['candidates', 0.98])
     c.advance(1000)
     p.update(1)
-    expect(writes.at(-1)).toEqual(['prepare-preview', 1])
+    expect(writes.at(-1)).toEqual(['candidates', 1])
     expect(p.overall).toBe(1)
-    expect(p.current).toBe('prepare-preview')
+    expect(p.current).toBe('candidates')
     const values = writes.map(([, v]) => v)
     expect([...values].sort((a, b) => a - b)).toEqual(values)
+  })
+
+  it('a highlights-only run that skips extract-audio jumps straight to 10 %', () => {
+    const writes: Array<[string, number]> = []
+    const p = createStepProgress(ANALYSIS_STEPS.highlights, (step, v) => writes.push([step, v]), () => 0, 0)
+    p.step('signals')
+    p.update(SIGNALS_STEP_SHARES.loudness)
+    p.step('candidates')
+    expect(writes).toEqual([['signals', 0.1], ['signals', 0.185], ['candidates', 0.95]])
   })
 
   it('limits writes to a few per second under a flood of updates', () => {
     const c = clock()
     let count = 0
-    const p = createStepProgress(ANALYSIS_STEPS, () => count++, c.now, 250)
+    const p = createStepProgress(ANALYSIS_STEPS.full, () => count++, c.now, 250)
     p.step('transcribe')
     for (let i = 1; i <= 1000; i++) {
       c.advance(1)
@@ -82,7 +104,7 @@ describe('createStepProgress', () => {
   })
 
   it('rejects unknown steps', () => {
-    const p = createStepProgress(ANALYSIS_STEPS, () => {}, () => 0, 0)
-    expect(() => p.step('signals' as never)).toThrow()
+    const p = createStepProgress(ANALYSIS_STEPS.highlights, () => {}, () => 0, 0)
+    expect(() => p.step('transcribe' as never)).toThrow()
   })
 })
