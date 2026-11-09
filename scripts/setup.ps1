@@ -18,12 +18,16 @@ param(
 $ErrorActionPreference = 'Continue'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 $OutputEncoding = [System.Text.Encoding]::UTF8
+# Without this, the corepack pnpm shim may wait on a hidden Y/n download prompt while we read the pnpm version.
+$env:COREPACK_ENABLE_DOWNLOAD_PROMPT = '0'
 
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $Root
 
 # node:sqlite loads without a flag only from 22.13 on.
 $MinNodeVersion = [version]'22.13.0'
+# Oldest pnpm that reads the build approvals in pnpm-workspace.yaml. Same as MIN_PNPM_VERSION in scripts/lib/common.mjs.
+$MinPnpmVersion = [version]'10.5.0'
 $AsrModels = @(
   @{ Id = 'SoybeanMilk/faster-whisper-Breeze-ASR-25'; Name = '中文模型 Breeze-ASR-25（約 3 GB）' },
   @{ Id = 'deepdml/faster-whisper-large-v3-turbo-ct2'; Name = '英文模型 Whisper large-v3-turbo（約 1.6 GB）' }
@@ -59,9 +63,12 @@ function Add-Note([string]$Text) {
   Write-Host ('    注意：' + $Text) -ForegroundColor Yellow
 }
 
-function Stop-Setup([string]$Text) {
+function Stop-Setup([string]$Text, [string[]]$Details = @()) {
   Write-Host ''
   Write-Host ('安裝中止：' + $Text) -ForegroundColor Red
+  foreach ($line in $Details) {
+    Write-Host ('  ' + $line)
+  }
   exit 1
 }
 
@@ -87,6 +94,23 @@ function Get-NodeVersion {
     return [version]('{0}.{1}.{2}' -f $Matches[1], $Matches[2], $Matches[3])
   }
   return $null
+}
+
+# Version of the pnpm on PATH, or $null when there is none or it cannot run (a broken shim counts as missing).
+function Get-PnpmVersion {
+  if (-not (Test-Command 'pnpm')) { return $null }
+  $raw = & pnpm --version 2>$null
+  if ($LASTEXITCODE -ne 0) { return $null }
+  if ("$raw" -match '(\d+)\.(\d+)\.(\d+)') {
+    return [version]('{0}.{1}.{2}' -f $Matches[1], $Matches[2], $Matches[3])
+  }
+  return $null
+}
+
+function Get-PnpmPath {
+  $found = Get-Command 'pnpm' -ErrorAction SilentlyContinue
+  if ($null -eq $found) { return '' }
+  return [string]$found.Source
 }
 
 function Test-ToolReady($Tool) {
@@ -191,29 +215,55 @@ foreach ($tool in $Tools) {
 }
 
 # ---- 3. pnpm ----
+# A pnpm that is new enough is kept as it is (pnpm 11 and 12 work too): never downgrade it.
+# A missing, broken or too old pnpm gets the newest pnpm 10.
 Write-Step '檢查 pnpm'
-if (Test-Command 'pnpm') {
-  Write-Ok 'pnpm 已安裝'
+$pnpmVersion = Get-PnpmVersion
+if (($null -ne $pnpmVersion) -and ($pnpmVersion -ge $MinPnpmVersion)) {
+  Write-Ok ('pnpm ' + $pnpmVersion + ' 已安裝')
 }
 else {
-  Write-Info '安裝 pnpm（npm install -g pnpm@10）…'
+  if ($null -eq $pnpmVersion) {
+    Write-Info '安裝 pnpm（npm install -g pnpm@10）…'
+  }
+  else {
+    Write-Info ('pnpm ' + $pnpmVersion + ' 太舊，需要 ' + $MinPnpmVersion + ' 以上，更新中（npm install -g pnpm@10）…')
+  }
   & npm install -g pnpm@10
   Update-SessionPath
   if (-not (Test-Command 'pnpm')) {
     $npmPrefix = & npm prefix -g 2>$null
     if ($npmPrefix) { $env:Path = $env:Path + ';' + "$npmPrefix".Trim() }
   }
-  if (-not (Test-Command 'pnpm')) {
+  $pnpmVersion = Get-PnpmVersion
+  if ($null -eq $pnpmVersion) {
+    $pnpmPath = Get-PnpmPath
+    if ($pnpmPath) {
+      Stop-Setup ('找到 pnpm（' + $pnpmPath + '），但無法執行。請關閉這個視窗後重新執行 setup.bat；還是不行的話，請手動執行：npm install -g pnpm@10')
+    }
     Stop-Setup 'pnpm 安裝失敗。請關閉這個視窗後重新執行 setup.bat；還是不行的話，請手動執行：npm install -g pnpm@10'
   }
-  Write-Ok 'pnpm 安裝完成'
+  if ($pnpmVersion -lt $MinPnpmVersion) {
+    # Another pnpm (corepack, the standalone installer) comes before the one from npm on PATH.
+    Stop-Setup ('更新後找到的 pnpm 還是 ' + $pnpmVersion + '（' + (Get-PnpmPath) + '），需要 ' + $MinPnpmVersion + ' 以上。這個 pnpm 不是用 npm 裝的（例如 corepack 或 pnpm 官方安裝程式），請用當初安裝它的方式更新到 ' + $MinPnpmVersion + ' 以上，或移除它之後重新執行 setup.bat。')
+  }
+  Write-Ok ('pnpm ' + $pnpmVersion + ' 安裝完成')
 }
 
 # ---- 4. Web app packages ----
 Write-Step '安裝網頁程式的套件（pnpm install）'
-& pnpm install
+# confirm-modules-purge=false: node_modules made by another pnpm major is rebuilt instead of asking Y/n.
+& pnpm install --config.confirm-modules-purge=false
 if ($LASTEXITCODE -ne 0) {
-  Stop-Setup 'pnpm install 失敗。請確認網路連線後重新執行 setup.bat。'
+  # pnpm printed the real error just above; list the common causes instead of guessing one.
+  Stop-Setup 'pnpm install 失敗，原因請看上面 pnpm 印出的錯誤訊息（通常在最後幾行）。' @(
+    '常見原因：',
+    '- 網路連不到套件庫（ERR_PNPM_FETCH_…、ETIMEDOUT、ECONNRESET、ENOTFOUND）：確認網路連線後再試一次。',
+    '- 檔案被其他程式占用（EPERM、EBUSY）：關掉正在執行的 gg-highlight 和其他開著這個資料夾裡檔案的程式後再試一次。',
+    '- ERR_PNPM_IGNORED_BUILDS（套件的安裝腳本被 pnpm 擋下）：請更新到最新版的 gg-highlight 再試（README 的「疑難排解」有說明）。',
+    '- ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION（有套件發布還不到一天，pnpm 11 以上會先擋下）：隔天再試一次。',
+    '處理後重新執行 setup.bat；也可以執行 node scripts\doctor.mjs 檢查環境。'
+  )
 }
 Write-Ok '套件安裝完成'
 

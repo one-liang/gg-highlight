@@ -8,6 +8,11 @@ import { fileURLToPath } from 'node:url'
 export const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 
 export const MIN_NODE_VERSION = '22.12.0'
+/**
+ * Oldest pnpm that reads the build approvals in pnpm-workspace.yaml (10.0–10.4 install without
+ * running the esbuild / vue-demi install scripts). Keep in sync with $MinPnpmVersion in setup.ps1.
+ */
+export const MIN_PNPM_VERSION = '10.5.0'
 
 /** Commands that are .cmd shims on Windows and need a shell to start. */
 const WINDOWS_SHIMS = new Set(['pnpm', 'npm', 'npx', 'corepack'])
@@ -48,6 +53,10 @@ export function compareVersions(a, b) {
 }
 
 export function nodeVersionOk(version = process.versions.node, min = MIN_NODE_VERSION) {
+  return compareVersions(version, min) >= 0
+}
+
+export function pnpmVersionOk(version, min = MIN_PNPM_VERSION) {
   return compareVersions(version, min) >= 0
 }
 
@@ -195,5 +204,15 @@ export function runInherited(command, args = [], opts = {}) {
 export function lastLine(text, max = 200) {
   const lines = String(text ?? '').split(/\r?\n/).map(l => l.trim()).filter(Boolean)
   const line = lines.at(-1) ?? ''
+  return line.length > max ? `${line.slice(0, max)}…` : line
+}
+
+/**
+ * The line of a failed command's stderr that names the error (e.g. Node's "Error: Cannot find module …"
+ * from a broken npm shim, whose last line is only "Node.js v22.x"), else its last line.
+ */
+export function errorLine(text, max = 200) {
+  const lines = String(text ?? '').split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+  const line = lines.find(l => /\b(error|err_[a-z_]+)\b|cannot find|not recognized|not found/i.test(l)) ?? lines.at(-1) ?? ''
   return line.length > max ? `${line.slice(0, max)}…` : line
 }

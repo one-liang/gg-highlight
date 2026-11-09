@@ -13,11 +13,13 @@ import {
   computeBuildStamp,
   computeInstallStamp,
   INSTALL_STAMP_FILE,
+  installFailureMessage,
   installStatus,
   isPortOpen,
   listenAddress,
   listStampFiles,
   parseArgs,
+  PNPM_INSTALL_ARGS,
   probeServer,
   serverEnv,
   STAMP_FILE,
@@ -141,6 +143,15 @@ describe('install stamp', () => {
     expect(await computeInstallStamp(tmp)).not.toBe(a)
   })
 
+  it('changes when pnpm-workspace.yaml (the build approvals) appears or changes', async () => {
+    const a = await computeInstallStamp(tmp)
+    await write('pnpm-workspace.yaml', 'allowBuilds:\n  esbuild: true\n')
+    const b = await computeInstallStamp(tmp)
+    expect(b).not.toBe(a)
+    await write('pnpm-workspace.yaml', 'allowBuilds:\n  esbuild: true\n  vue-demi: true\n')
+    expect(await computeInstallStamp(tmp)).not.toBe(b)
+  })
+
   it('needs an install without node_modules, without a stamp, after a dependency change, and not otherwise', async () => {
     const stamp = await computeInstallStamp(tmp)
     // installed by setup.bat (no stamp yet)
@@ -153,6 +164,33 @@ describe('install stamp', () => {
     expect(await installStatus(tmp, await computeInstallStamp(tmp))).toEqual({ needed: true, reason: 'changed' })
     await fs.rm(path.join(tmp, 'node_modules'), { recursive: true })
     expect(await installStatus(tmp, stamp)).toEqual({ needed: true, reason: 'missing' })
+  })
+})
+
+describe('pnpm install', () => {
+  const version = (stdout: string) => ({ ok: true, notFound: false, stdout, stderr: '', error: null })
+
+  it('rebuilds node_modules made by another pnpm major instead of asking Y/n', () => {
+    expect(PNPM_INSTALL_ARGS).toEqual(['install', '--config.confirm-modules-purge=false'])
+  })
+
+  it('points at pnpm\'s own error and lists the common causes instead of blaming the network', () => {
+    const lines = installFailureMessage(version('12.18.0\n'))
+    const text = lines.join('\n')
+    expect(lines[0]).toMatch(/^❌ 套件安裝（pnpm install）失敗，原因請看上面 pnpm 印出的錯誤訊息/)
+    for (const cause of ['ERR_PNPM_FETCH_', 'EPERM', 'ERR_PNPM_IGNORED_BUILDS', 'ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION']) {
+      expect(text).toContain(cause)
+    }
+    expect(text).toMatch(/再雙擊 start\.bat/)
+    expect(text).not.toMatch(/pnpm 是|需要 10\.5/)
+  })
+
+  it('says when pnpm is missing, too old or broken', () => {
+    expect(installFailureMessage({ ok: false, notFound: true, stdout: '', stderr: '', error: 'spawn pnpm ENOENT' }))
+      .toEqual(['❌ 找不到 pnpm。請先雙擊 setup.bat 安裝需要的工具，裝好後再雙擊 start.bat。'])
+    expect(installFailureMessage(version('10.4.1\n'))[1]).toBe('   你的 pnpm 是 10.4.1，需要 10.5.0 以上：請重新執行 setup.bat，它會更新 pnpm。')
+    expect(installFailureMessage({ ok: false, notFound: false, stdout: '', stderr: 'Error: boom\n', error: null })[1])
+      .toBe('   pnpm 本身無法執行（Error: boom）：請重新執行 setup.bat。')
   })
 })
 
@@ -319,6 +357,7 @@ function launch(root: string, env: Record<string, string>): Launch {
 
 const FAKE_INSTALL = `
 import fs from 'node:fs'
+if (process.env.GG_TEST_INSTALL_FAIL) process.exit(1)
 fs.appendFileSync('install-count.txt', 'i')
 `
 
@@ -340,6 +379,22 @@ async function fakeRoot(withBuild: boolean, { installed = true } = {}) {
   if (withBuild) {
     await write('.output/server/index.mjs', FAKE_SERVER)
     await writeBuildStamp(tmp, await computeBuildStamp(tmp))
+  }
+}
+
+/**
+ * A `pnpm` first on PATH that logs its arguments, then runs the real one. pnpm 11 and later skip the
+ * root postinstall when nothing changed, so counting postinstall runs would miss an install.
+ */
+async function pnpmSpy() {
+  const real = spawnSync('sh', ['-c', 'command -v pnpm'], { encoding: 'utf8' }).stdout.trim()
+  const dir = path.join(tmp, '.spy')
+  const log = path.join(dir, 'calls.txt')
+  await write('.spy/pnpm', `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\nexec ${JSON.stringify(real)} "$@"\n`)
+  await fs.chmod(path.join(dir, 'pnpm'), 0o755)
+  return {
+    env: { PATH: `${dir}${path.delimiter}${process.env.PATH ?? ''}` },
+    calls: async () => (await fs.readFile(log, 'utf8').catch(() => '')).split('\n').filter(Boolean),
   }
 }
 
@@ -395,58 +450,67 @@ describe.skipIf(process.platform === 'win32')('main (fake project)', () => {
 
   it.skipIf(!hasPnpm)('runs pnpm build when the build is missing or stale, then only when sources change', async () => {
     await fakeRoot(false)
+    // A real install, as setup.bat leaves it: pnpm 11+ installs before `pnpm build` when node_modules
+    // is not one it made, which would add a lockfile to this fake project.
+    const install = spawnSync('pnpm', ['install'], { cwd: tmp, encoding: 'utf8', windowsHide: true })
+    expect(install.status, install.stdout + install.stderr).toBe(0)
+    await writeInstallStamp(tmp, await computeInstallStamp(tmp))
     const port = String(await freePort())
     const marker = path.join(tmp, 'm')
+    const spy = await pnpmSpy()
 
-    const first = launch(tmp, { PORT: port, GG_TEST_MARKER: marker })
+    const first = launch(tmp, { ...spy.env, PORT: port, GG_TEST_MARKER: marker })
     await first.waitFor(/gg-highlight 已啟動/, 60_000)
     expect(first.output()).toMatch(/第一次啟動：建置程式/)
     first.child.kill('SIGTERM')
     expect(await first.exit).toBe(0)
     expect(existsSync(path.join(tmp, STAMP_FILE))).toBe(true)
 
-    const second = launch(tmp, { PORT: port, GG_TEST_MARKER: marker })
+    const second = launch(tmp, { ...spy.env, PORT: port, GG_TEST_MARKER: marker })
     await second.waitFor(/gg-highlight 已啟動/)
     expect(second.output()).not.toMatch(/建置/)
     second.child.kill('SIGTERM')
     expect(await second.exit).toBe(0)
 
     await write('server/api/system.get.ts', 'export default 2')
-    const third = launch(tmp, { PORT: port, GG_TEST_MARKER: marker })
+    const third = launch(tmp, { ...spy.env, PORT: port, GG_TEST_MARKER: marker })
     await third.waitFor(/gg-highlight 已啟動/, 60_000)
     expect(third.output()).toMatch(/程式有更新，重新建置/)
     third.child.kill('SIGTERM')
     expect(await third.exit).toBe(0)
 
     expect(await fs.readFile(path.join(tmp, 'build-count.txt'), 'utf8')).toBe('xx')
-    expect(existsSync(path.join(tmp, 'install-count.txt'))).toBe(false)
+    expect(await spy.calls()).toEqual(['build', 'build'])
   })
 
   it.skipIf(!hasPnpm)('runs pnpm install without node_modules and after a dependency change, before building', async () => {
     await fakeRoot(true, { installed: false })
     const port = String(await freePort())
     const marker = path.join(tmp, 'm')
-    const installs = () => fs.readFile(path.join(tmp, 'install-count.txt'), 'utf8').catch(() => '')
+    const spy = await pnpmSpy()
+    const installs = async () => (await spy.calls()).filter(c => c.startsWith('install'))
+    const installCall = PNPM_INSTALL_ARGS.join(' ')
 
-    const first = launch(tmp, { PORT: port, GG_TEST_MARKER: marker })
+    const first = launch(tmp, { ...spy.env, PORT: port, GG_TEST_MARKER: marker })
     await first.waitFor(/gg-highlight 已啟動/, 60_000)
     expect(first.output()).toMatch(/第一次啟動：安裝套件/)
     first.child.kill('SIGTERM')
     expect(await first.exit).toBe(0)
-    expect(await installs()).toBe('i')
+    expect(await installs()).toEqual([installCall])
+    expect(await fs.readFile(path.join(tmp, 'install-count.txt'), 'utf8')).toBe('i')
     expect(existsSync(path.join(tmp, INSTALL_STAMP_FILE))).toBe(true)
 
     // nothing changed: no install
-    const second = launch(tmp, { PORT: port, GG_TEST_MARKER: marker })
+    const second = launch(tmp, { ...spy.env, PORT: port, GG_TEST_MARKER: marker })
     await second.waitFor(/gg-highlight 已啟動/)
     expect(second.output()).not.toMatch(/pnpm install/)
     second.child.kill('SIGTERM')
     expect(await second.exit).toBe(0)
-    expect(await installs()).toBe('i')
+    expect(await installs()).toEqual([installCall])
 
     // an update changed package.json (a new dependency would go here): install, then rebuild
     await write('package.json', JSON.stringify({ ...FAKE_PACKAGE, description: 'updated' }))
-    const third = launch(tmp, { PORT: port, GG_TEST_MARKER: marker })
+    const third = launch(tmp, { ...spy.env, PORT: port, GG_TEST_MARKER: marker })
     await third.waitFor(/gg-highlight 已啟動/, 60_000)
     const out = third.output()
     expect(out).toMatch(/套件有更新，安裝套件/)
@@ -454,7 +518,30 @@ describe.skipIf(process.platform === 'win32')('main (fake project)', () => {
     expect(out.indexOf('套件有更新')).toBeLessThan(out.indexOf('程式有更新'))
     third.child.kill('SIGTERM')
     expect(await third.exit).toBe(0)
-    expect(await installs()).toBe('ii')
+    expect(await installs()).toEqual([installCall, installCall])
+  })
+
+  it.skipIf(!hasPnpm)('stops before building when pnpm install fails, and points at pnpm\'s error', async () => {
+    await fakeRoot(false, { installed: false })
+    const run = launch(tmp, { PORT: String(await freePort()), GG_TEST_INSTALL_FAIL: '1', GG_TEST_MARKER: path.join(tmp, 'm') })
+    const code = await run.exit
+    expect(code).not.toBe(0)
+    const out = run.output()
+    expect(out).toMatch(/套件安裝（pnpm install）失敗，原因請看上面 pnpm 印出的錯誤訊息/)
+    expect(out).toMatch(/ERR_PNPM_IGNORED_BUILDS/)
+    expect(out).not.toMatch(/請確認網路連線，或重新執行 setup\.bat/)
+    expect(out).not.toMatch(/建置程式/)
+    expect(existsSync(path.join(tmp, INSTALL_STAMP_FILE))).toBe(false)
+  })
+
+  it('says pnpm is missing instead of blaming the install', async () => {
+    await fakeRoot(false, { installed: false })
+    const empty = path.join(tmp, '.empty-path')
+    await fs.mkdir(empty)
+    const run = launch(tmp, { PATH: empty, PORT: String(await freePort()), GG_TEST_MARKER: path.join(tmp, 'm') })
+    expect(await run.exit).not.toBe(0)
+    expect(run.output()).toMatch(/找不到 pnpm。請先雙擊 setup\.bat/)
+    expect(run.output()).not.toMatch(/原因請看上面/)
   })
 
   it.skipIf(!hasPnpm)('checks the packages once when node_modules came from somewhere else (setup.bat)', async () => {

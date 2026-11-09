@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { MIN_PNPM_VERSION } from './lib/common.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(here, '..')
@@ -52,6 +53,24 @@ describe('setup.ps1', () => {
     expect(text).toContain('deepdml/faster-whisper-large-v3-turbo-ct2')
     expect(text).toMatch(/\[switch\]\$SkipOptional/)
     expect(text).toMatch(/\[switch\]\$SkipModels/)
+  })
+
+  it('checks the pnpm version against the same minimum as the Node scripts', () => {
+    expect(text).toContain(`$MinPnpmVersion = [version]'${MIN_PNPM_VERSION}'`)
+    expect(text).toMatch(/\$pnpmVersion -ge \$MinPnpmVersion/)
+    expect(text).toMatch(/\$pnpmVersion -lt \$MinPnpmVersion/)
+    // The version comes from running `pnpm --version`, so a shim that cannot run counts as missing.
+    expect(text).toMatch(/& pnpm --version 2>\$null/)
+  })
+
+  it('runs pnpm install without a Y/n prompt and explains a failure without blaming the network', () => {
+    expect(text).toContain('& pnpm install --config.confirm-modules-purge=false')
+    const step = text.slice(text.indexOf('# ---- 4.'), text.indexOf('# ---- 5.'))
+    expect(step).toMatch(/原因請看上面 pnpm 印出的錯誤訊息/)
+    for (const cause of ['ERR_PNPM_FETCH_', 'EPERM', 'ERR_PNPM_IGNORED_BUILDS', 'ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION']) {
+      expect(step).toContain(cause)
+    }
+    expect(step).not.toMatch(/請確認網路連線後重新執行 setup\.bat/)
   })
 })
 

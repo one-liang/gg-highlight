@@ -160,8 +160,25 @@ describe('checkPnpm / checkUv', () => {
   it('fails with a fix when missing', async () => {
     const pnpm = await checkPnpm(ctx())
     expect(pnpm).toMatchObject({ status: 'fail', required: true, detail: '找不到 pnpm' })
+    expect(pnpm.fix).toMatch(/setup\.bat/)
     expect(pnpm.fix).toMatch(/npm install -g pnpm@10/)
     expect((await checkUv(ctx())).fix).toMatch(/astral-sh\.uv/)
+  })
+  it('fails a pnpm older than 10.5, which does not read the build approvals in pnpm-workspace.yaml', async () => {
+    for (const version of ['9.15.9', '10.0.0', '10.4.1']) {
+      const r = await checkPnpm(ctx({ run: fakeRun({ 'pnpm --version': ok(`${version}\n`) }) }))
+      expect(r).toMatchObject({ status: 'fail', required: true, detail: `${version}，需要 10.5.0 以上（10、11、12 都可以）` })
+      expect(r.fix).toMatch(/重新執行 setup\.bat（會安裝或更新 pnpm）/)
+    }
+  })
+  it('accepts pnpm 10.5 and later, including 11 and 12', async () => {
+    for (const version of ['10.5.0', '10.34.9', '11.28.11', '12.18.0']) {
+      expect(await checkPnpm(ctx({ run: fakeRun({ 'pnpm --version': ok(`${version}\n`) }) }))).toMatchObject({ status: 'ok', detail: version })
+    }
+  })
+  it('reports a pnpm that cannot run', async () => {
+    const r = await checkPnpm(ctx({ run: fakeRun({ 'pnpm --version': failed('Error: boom\n') }) }))
+    expect(r).toMatchObject({ status: 'fail', detail: '無法執行：Error: boom' })
   })
 })
 
@@ -326,7 +343,7 @@ describe('checkLaterTools', () => {
 
 describe('runChecks / report', () => {
   const everythingOk = fakeRun({
-    'pnpm --version': ok('10.0.0'),
+    'pnpm --version': ok('10.34.9'),
     'ffmpeg -version': ok('ffmpeg version 7.1 x'),
     'ffprobe -version': ok('ffprobe version 7.1 x'),
     'ffmpeg -hide_banner -buildconf': ok('--enable-libass'),
@@ -354,7 +371,7 @@ describe('runChecks / report', () => {
     expect(exitCodeFor(results)).toBe(1)
     const report = formatReport(results)
     expect(report).toMatch(/❌ pnpm：找不到 pnpm/)
-    expect(report).toMatch(/ {3}→ 執行 npm install -g pnpm@10/)
+    expect(report).toMatch(/ {3}→ 重新執行 setup\.bat（會安裝或更新 pnpm），或執行 npm install -g pnpm@10/)
     expect(report).toMatch(/個必要項目沒有通過/)
   })
 })

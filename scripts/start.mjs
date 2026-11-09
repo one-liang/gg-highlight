@@ -9,16 +9,31 @@ import fsp from 'node:fs/promises'
 import http from 'node:http'
 import net from 'node:net'
 import path from 'node:path'
-import { isMain, nodeProblem, projectRoot, runInherited } from './lib/common.mjs'
+import {
+  errorLine,
+  isMain,
+  lastLine,
+  MIN_PNPM_VERSION,
+  nodeProblem,
+  pnpmVersionOk,
+  projectRoot,
+  runCommand,
+  runInherited,
+} from './lib/common.mjs'
 
 /** Folders and files whose changes require a new `pnpm build`. */
 export const STAMP_DIRS = ['app', 'server', 'shared']
 export const STAMP_FILES = ['nuxt.config.ts', 'package.json', 'pnpm-lock.yaml']
 export const STAMP_FILE = path.join('.output', '.gg-build-stamp')
 export const SERVER_ENTRY = path.join('.output', 'server', 'index.mjs')
-/** Files whose contents decide whether `pnpm install` must run again. */
-export const INSTALL_STAMP_FILES = ['package.json', 'pnpm-lock.yaml']
+/** Files whose contents decide whether `pnpm install` must run again (pnpm-workspace.yaml holds the build approvals). */
+export const INSTALL_STAMP_FILES = ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml']
 export const INSTALL_STAMP_FILE = path.join('node_modules', '.gg-install-stamp')
+/**
+ * `pnpm install` without the Y/n prompt pnpm shows when node_modules was made by another pnpm major
+ * (after a pnpm update): it rebuilds node_modules instead. Same flag as setup.ps1.
+ */
+export const PNPM_INSTALL_ARGS = ['install', '--config.confirm-modules-purge=false']
 export const DEFAULT_HOST = '127.0.0.1'
 export const DEFAULT_PORT = 3939
 /**
@@ -101,7 +116,7 @@ export async function buildStatus(root, stamp) {
   return { needed: false, reason: null }
 }
 
-/** Hash of the contents of package.json and pnpm-lock.yaml (not their mtimes: a git checkout or an unzip changes those). */
+/** Hash of the contents of INSTALL_STAMP_FILES (not their mtimes: a git checkout or an unzip changes those). */
 export async function computeInstallStamp(root) {
   const hash = createHash('sha256')
   for (const rel of INSTALL_STAMP_FILES) {
@@ -134,7 +149,7 @@ export async function writeInstallStamp(root, stamp) {
 
 /**
  * Whether `pnpm install` must run: no node_modules yet ('missing'), installed by something else
- * such as setup.bat ('unknown'), or package.json / the lockfile changed since ('changed').
+ * such as setup.bat ('unknown'), or package.json / the lockfile / pnpm-workspace.yaml changed since ('changed').
  */
 export async function installStatus(root, stamp) {
   if (!fs.existsSync(path.join(root, 'node_modules'))) return { needed: true, reason: 'missing' }
@@ -148,6 +163,31 @@ const INSTALL_MESSAGES = {
   missing: '▶ 第一次啟動：安裝套件（pnpm install），需要幾分鐘…',
   unknown: '▶ 確認套件是否齊全（pnpm install）…',
   changed: '▶ 套件有更新，安裝套件（pnpm install）…',
+}
+
+/**
+ * What to print after `pnpm install` failed. pnpm already printed the real error above it, so this
+ * lists the common causes instead of guessing one. `pnpm` is the result of `pnpm --version`.
+ * @param {{ ok: boolean, notFound: boolean, stdout: string, stderr: string, error: string | null }} pnpm
+ */
+export function installFailureMessage(pnpm) {
+  if (pnpm.notFound) return ['❌ 找不到 pnpm。請先雙擊 setup.bat 安裝需要的工具，裝好後再雙擊 start.bat。']
+  const lines = ['❌ 套件安裝（pnpm install）失敗，原因請看上面 pnpm 印出的錯誤訊息（通常在最後幾行）。']
+  if (!pnpm.ok) {
+    lines.push(`   pnpm 本身無法執行（${errorLine(pnpm.stderr) || pnpm.error}）：請重新執行 setup.bat。`)
+  }
+  else if (!pnpmVersionOk(lastLine(pnpm.stdout))) {
+    lines.push(`   你的 pnpm 是 ${lastLine(pnpm.stdout)}，需要 ${MIN_PNPM_VERSION} 以上：請重新執行 setup.bat，它會更新 pnpm。`)
+  }
+  lines.push(
+    '   常見原因：',
+    '   - 網路連不到套件庫（ERR_PNPM_FETCH_…、ETIMEDOUT、ECONNRESET、ENOTFOUND）：確認網路連線後再試一次。',
+    '   - 檔案被其他程式占用（EPERM、EBUSY）：關掉開著這個資料夾裡檔案的程式（例如編輯器、另一個命令視窗）後再試一次。',
+    '   - ERR_PNPM_IGNORED_BUILDS（套件的安裝腳本被 pnpm 擋下）：請更新到最新版的 gg-highlight 再試（README 的「疑難排解」有說明）。',
+    '   - ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION（有套件發布還不到一天，pnpm 11 以上會先擋下）：隔天再試一次。',
+    '   處理後再雙擊 start.bat 一次。',
+  )
+  return lines
 }
 
 /** HOST / PORT from the environment, validated so they are safe to put in a URL and a shell command. */
@@ -327,9 +367,10 @@ export async function main({
   const install = await installStatus(root, await computeInstallStamp(root))
   if (install.needed) {
     log(INSTALL_MESSAGES[install.reason])
-    const code = await runInherited('pnpm', ['install'], { cwd: root, env, platform })
+    const code = await runInherited('pnpm', PNPM_INSTALL_ARGS, { cwd: root, env, platform })
     if (code !== 0) {
-      log('❌ 套件安裝失敗。請確認網路連線，或重新執行 setup.bat 後再試一次。')
+      const pnpm = await runCommand('pnpm', ['--version'], { cwd: root, env, platform, timeoutMs: 30_000 })
+      for (const line of installFailureMessage(pnpm)) log(line)
       return code || 1
     }
     // pnpm may have rewritten the lockfile: stamp what is there now.

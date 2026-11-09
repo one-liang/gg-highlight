@@ -5,10 +5,13 @@ import {
   commandSpec,
   compareVersions,
   isMain,
+  errorLine,
   lastLine,
+  MIN_PNPM_VERSION,
   nodeProblem,
   nodeVersionOk,
   parseVersion,
+  pnpmVersionOk,
   projectRoot,
   runCommand,
 } from './lib/common.mjs'
@@ -56,6 +59,17 @@ describe('parseVersion / compareVersions', () => {
     expect(nodeVersionOk('22.12.0')).toBe(true)
     expect(nodeVersionOk('24.0.0')).toBe(true)
     expect(nodeVersionOk('20.18.0')).toBe(false)
+  })
+
+  it('requires pnpm 10.5 or newer, with no upper limit', () => {
+    expect(MIN_PNPM_VERSION).toBe('10.5.0')
+    expect(pnpmVersionOk('9.15.9')).toBe(false)
+    expect(pnpmVersionOk('10.4.1')).toBe(false)
+    expect(pnpmVersionOk('10.5.0')).toBe(true)
+    expect(pnpmVersionOk('10.28.0')).toBe(true)
+    expect(pnpmVersionOk('11.28.11')).toBe(true)
+    expect(pnpmVersionOk('12.18.0')).toBe(true)
+    expect(pnpmVersionOk('')).toBe(false)
   })
 })
 
@@ -116,6 +130,28 @@ describe('runCommand', () => {
     expect(r.ok).toBe(false)
     expect(r.timedOut).toBe(true)
     expect(Date.now() - started).toBeLessThan(10_000)
+  })
+})
+
+describe('errorLine', () => {
+  it('picks the line that names the error over a trailing Node version line', () => {
+    const crash = [
+      'node:internal/modules/cjs/loader:1228',
+      '  throw err;',
+      '  ^',
+      '',
+      "Error: Cannot find module 'C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\pnpm\\bin\\pnpm.cjs'",
+      '    at Module._resolveFilename (node:internal/modules/cjs/loader:1225:15)',
+      '',
+      'Node.js v22.12.0',
+    ].join('\r\n')
+    expect(errorLine(crash)).toMatch(/^Error: Cannot find module/)
+  })
+
+  it('falls back to the last line and trims long lines', () => {
+    expect(errorLine('a\nb\n')).toBe('b')
+    expect(errorLine('')).toBe('')
+    expect(errorLine(`ERR_PNPM_X ${'x'.repeat(300)}`, 10)).toBe('ERR_PNPM_X…')
   })
 })
 

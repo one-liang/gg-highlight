@@ -102,10 +102,16 @@ tests/                   測試素材產生器、整合測試、e2e
 ### 啟動（`scripts/start.mjs`，`start.bat` 呼叫）
 
 1. 連接埠已經有 gg-highlight 在跑：只打開瀏覽器。
-2. `node_modules` 不存在，或 `package.json`／`pnpm-lock.yaml` 的內容和上次安裝時不同（`node_modules/.gg-install-stamp`，比內容不比修改時間）：先 `pnpm install`。setup.bat 裝好之後第一次啟動也會確認一次。
+2. `node_modules` 不存在，或 `package.json`／`pnpm-lock.yaml`／`pnpm-workspace.yaml` 的內容和上次安裝時不同（`node_modules/.gg-install-stamp`，比內容不比修改時間）：先 `pnpm install --config.confirm-modules-purge=false`（`node_modules` 是另一個 pnpm 主版本裝的就直接重建，不停下來問 Y/n）。setup.bat 裝好之後第一次啟動也會確認一次。安裝失敗時不建置，請使用者看上面 pnpm 印出的錯誤訊息，並列出常見原因；找不到 pnpm 時請使用者執行 setup.bat。
 3. `app/`、`server/`、`shared/` 或設定檔變了（`.output/.gg-build-stamp`）：`pnpm build`。
 4. 用 `HOST`／`PORT`（預設 `127.0.0.1:3939`）與 `NITRO_SHUTDOWN_TIMEOUT=3000` 啟動伺服器，準備好後打開瀏覽器。
 5. Ctrl+C 或關閉視窗：伺服器最多約 6 秒內關閉（等回應 3 秒＋`close` hook 3 秒）；15 秒還沒結束才強制結束。
+
+### pnpm 版本
+
+- 支援 pnpm 10.5 以上（10、11、12）。設定在 `pnpm-workspace.yaml`：`packages: ['.']`（pnpm 9 與 10.0–10.4 沒有它會報錯），以及安裝腳本許可 `allowBuilds`（10.26 以上、11、12）與 `onlyBuiltDependencies`（10.5–10.25）兩份相同的清單。pnpm 11 以上遇到沒有列入許可、又有安裝腳本的套件，會讓安裝失敗（`ERR_PNPM_IGNORED_BUILDS`）；10.0–10.4 不讀這個檔案的許可，會跳過 esbuild 與 vue-demi 的安裝腳本。
+- setup.bat：沒有 pnpm、pnpm 無法執行，或版本低於 10.5 時，執行 `npm install -g pnpm@10`（pnpm 10 的最新版）；已經是 10.5 以上（包括 11、12）就沿用，不降級。更新後找到的還是舊版（PATH 上排在前面的是別的 pnpm）就停下來，顯示它的位置。
+- `scripts/doctor.mjs` 把低於 10.5 的 pnpm 列為必要項目沒通過。
 
 ### 資料夾 `data/`
 

@@ -31,7 +31,7 @@
    - 如果是下載 ZIP：解壓縮前先在 ZIP 檔上按右鍵 →「內容」→ 勾選「解除封鎖」，不然 Windows 可能會擋住批次檔。
 2. 在資料夾裡**雙擊 `setup.bat`**。它會一步一步顯示目前在做什麼，可以重複執行（已經裝好的會跳過）：
    - 用 winget 安裝缺少的工具：**Node.js LTS**、**FFmpeg**（Gyan.FFmpeg，含 libass 與 NVENC）、**uv**（管理 Python）、**Ollama** 與 **Deno**（里程碑 2、3 才會用到）。安裝 Node.js 時可能會跳出系統管理員權限的確認視窗。
-   - 安裝 pnpm（`npm install -g pnpm@10`）。
+   - 確認 pnpm 是 10.5 以上的版本（10、11、12 都可以）。沒有或太舊時用 `npm install -g pnpm@10` 安裝或更新；已經裝了較新的版本會直接沿用，不會降級。
    - 安裝網頁程式的套件（`pnpm install`）與語音辨識的 Python 環境（`uv sync --project transcriber`，會自動下載 Python 3.12）。
    - 下載字幕字型 Noto Sans CJK TC 到 `fonts/`。
    - **預先下載語音辨識模型**（約 5 GB，第一次需要一段時間）。
@@ -104,12 +104,15 @@ node scripts\doctor.mjs
 | 「連接埠 3939 已經被其他程式使用」 | 可能 gg-highlight 已經開著（直接用瀏覽器開 http://127.0.0.1:3939 即可），或是別的程式占用了。換一個連接埠：在命令提示字元執行 `set PORT=4000` 再執行 `start.bat`。 |
 | 模型下載失敗或很慢 | 確認網路可以連到 huggingface.co，再重新執行 `setup.bat`（已下載的部分會保留）。也可以單獨下載：`uv run --project transcriber gg-transcribe download --model SoybeanMilk/faster-whisper-Breeze-ASR-25`。模型放在 `%USERPROFILE%\.cache\huggingface`，空間不夠可以設定環境變數 `HF_HOME` 換到別的磁碟。 |
 | 建置失敗或畫面怪怪的 | 刪掉專案裡的 `.output` 資料夾，再雙擊 `start.bat` 重新建置；還是不行就重新執行 `setup.bat`。 |
+| setup.bat 或 start.bat 在安裝套件（`pnpm install`）時失敗 | 原因在 pnpm 印出的錯誤訊息裡（通常在最後幾行）。常見的有：網路連不到套件庫（`ERR_PNPM_FETCH_…`、`ETIMEDOUT`）→ 確認網路後再試；`ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION` → 有套件發布還不到一天，pnpm 11 以上會先擋下，隔天再試；`EPERM`、`EBUSY` → 檔案被其他程式占用，關掉後再試；`ERR_PNPM_IGNORED_BUILDS` → 見下一列。 |
+| 出現 `ERR_PNPM_IGNORED_BUILDS`（`Ignored build scripts: esbuild…`） | 舊版 gg-highlight 的設定 pnpm 11 以後讀不到，請更新到最新版再重新執行 `setup.bat`。下載 ZIP 的話，把新的 ZIP 解壓縮覆蓋原本的資料夾。用 git 的話，不要用 `git pull`（會被 pnpm 失敗時自己產生的 `pnpm-workspace.yaml`，以及舊版換行設定讓 `scripts/setup.ps1` 等檔案看起來「有本機修改」擋下），改在專案資料夾執行 `git fetch`，再執行 `git reset --hard "@{u}"`。這會丟掉對專案檔案的修改（你沒改過就沒影響）；`data\` 與 `fonts\` 不受影響。 |
+| setup.bat 說 pnpm 更新後還是舊版 | 電腦裡有另一個不是用 npm 裝的 pnpm（例如 corepack 或 pnpm 官方安裝程式裝的）排在前面。訊息裡會顯示它的位置：用當初安裝它的方式更新到 10.5 以上，或移除它之後重新執行 `setup.bat`。 |
 | setup.bat 說找不到 winget | 到 Microsoft Store 安裝或更新「應用程式安裝程式」（App Installer）。 |
 | 命令視窗的中文變亂碼 | 改用「Windows 終端機」（Windows 11 預設）開啟，或在視窗標題列按右鍵 → 內容，把字型換成支援中文的字型。 |
 
 ## 開發者
 
-需要 Node.js 22.13 以上、pnpm 10、ffmpeg（含 libass）、uv。
+需要 Node.js 22.13 以上、pnpm 10.5 以上（10、11、12 都可以）、ffmpeg（含 libass）、uv。
 
 ```bash
 pnpm install
@@ -129,6 +132,12 @@ pnpm start        # 等於 node scripts/start.mjs：需要時自動 install / bu
 - 會自己啟動 app：原始碼有變才 `pnpm build`，再用一個暫時的資料夾、隨機連接埠、`Systran/faster-whisper-tiny`（CPU）與 `libx264` 執行 `.output/server/index.mjs`，跑完刪掉暫時資料夾。tiny 模型第一次會從 Hugging Face 下載。
 - 測試只檢查頁面與 API，不依賴瀏覽器實際播放影片（開源版的 Chromium 不能解碼 H.264／AAC，這時預覽區顯示「瀏覽器不支援這個格式」是正常的）。
 - 設定 `E2E_SHOTS_DIR=<資料夾>` 會把主要頁面的全頁截圖存到那裡；失敗時的截圖與 trace 在 `test-results/`，報告用 `npx playwright show-report` 開。
+
+pnpm 的設定放在 `pnpm-workspace.yaml`（pnpm 11 起不讀 `package.json` 的 `pnpm` 欄位）：
+
+- 允許哪些套件在安裝時執行安裝腳本，同一份清單寫兩次：`allowBuilds`（pnpm 10.26 以上、11、12 讀這個）與 `onlyBuiltDependencies`（pnpm 10.5–10.25）。新增的套件有安裝腳本時兩邊都要加，否則 pnpm 11 以上會讓安裝失敗（`ERR_PNPM_IGNORED_BUILDS`）；`scripts/pnpm-config.test.ts` 會檢查。不要用 `pnpm approve-builds` 改這個檔案，它會刪掉 `onlyBuiltDependencies`。
+- `packages: ['.']` 不能拿掉：pnpm 9 與 10.0–10.4 讀到沒有它的 `pnpm-workspace.yaml` 會直接報錯（連 `pnpm --version` 都會）。
+- pnpm 11 以上安裝時會擋下 lockfile 裡發布還不到一天的版本（`minimumReleaseAge`），所以更新套件後，等新版本發布滿一天再推上去。
 
 其他腳本：
 

@@ -33,13 +33,5 @@
   },
   "engines": {
     "node": ">=22.13"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "esbuild",
-      "vue-demi",
-      "@parcel/watcher",
-      "@tailwindcss/oxide"
-    ]
   }
 }

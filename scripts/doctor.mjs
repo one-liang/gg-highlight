@@ -7,10 +7,13 @@ import path from 'node:path'
 import { findInstalledFont, resolveFontsDir } from './fetch-fonts.mjs'
 import {
   compareVersions,
+  errorLine,
   hasNodeSqlite,
   isMain,
   lastLine,
   MIN_NODE_VERSION,
+  MIN_PNPM_VERSION,
+  pnpmVersionOk,
   projectRoot,
   runCommand,
 } from './lib/common.mjs'
@@ -148,10 +151,16 @@ export async function checkNode(ctx) {
 }
 
 export async function checkPnpm(ctx) {
+  const fix = '重新執行 setup.bat（會安裝或更新 pnpm），或執行 npm install -g pnpm@10'
   const r = await ctx.run('pnpm', ['--version'], { cwd: ctx.root, timeoutMs: VERSION_TIMEOUT_MS })
-  if (r.ok) return result('pnpm', 'pnpm', 'ok', r.stdout.trim())
-  return result('pnpm', 'pnpm', 'fail', r.notFound ? '找不到 pnpm' : `無法執行：${lastLine(r.stderr) || r.error}`,
-    '執行 npm install -g pnpm@10（或重新執行 setup.bat）')
+  if (!r.ok) {
+    return result('pnpm', 'pnpm', 'fail', r.notFound ? '找不到 pnpm' : `無法執行：${errorLine(r.stderr) || r.error}`, fix)
+  }
+  const version = lastLine(r.stdout)
+  if (!pnpmVersionOk(version)) {
+    return result('pnpm', 'pnpm', 'fail', `${version}，需要 ${MIN_PNPM_VERSION} 以上（10、11、12 都可以）`, fix)
+  }
+  return result('pnpm', 'pnpm', 'ok', version)
 }
 
 /** ffmpeg, ffprobe and libass, in that order. */
