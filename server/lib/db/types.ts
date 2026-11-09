@@ -1,7 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import type {
   AnalysisState, Clip, Highlight, HighlightOrigin, HighlightStatus, Language, Layout, MediaInfo,
-  Settings, SourceKind, SourceVideo, TranscriptSegment,
+  Settings, SourceKind, SourceVideo, TranscriptSegment, YoutubeMeta,
 } from '../../../shared/types/domain'
 import type { SegmentDraft } from '../subtitles'
 
@@ -15,6 +15,8 @@ export interface NewVideo {
   sourceKind: SourceKind
   filePath: string | null
   youtubeUrl: string | null
+  /** Stored in videos.youtube_json (youtube.id also in videos.youtube_id for findByYoutubeId); null for local files. */
+  youtube: YoutubeMeta | null
   language: Language
   audioTrack: number
   media: MediaInfo | null
@@ -51,7 +53,9 @@ export interface Repositories {
     /** Newest first. */
     list(): VideoRecord[]
     findByFilePath(filePath: string): VideoRecord | null
-    update(id: string, patch: Partial<Pick<VideoRecord, 'title' | 'filePath' | 'media' | 'previewPath'>>): VideoRecord | null
+    /** The Source Video of this 11-character YouTube id, or null. */
+    findByYoutubeId(youtubeId: string): VideoRecord | null
+    update(id: string, patch: Partial<Pick<VideoRecord, 'title' | 'filePath' | 'media' | 'previewPath' | 'youtube'>>): VideoRecord | null
     updateAnalysis(id: string, patch: Partial<AnalysisState>): VideoRecord | null
     /** Oldest queued video (FIFO by the time it was queued), or null. */
     nextQueued(): VideoRecord | null

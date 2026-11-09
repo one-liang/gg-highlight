@@ -38,9 +38,23 @@ export interface TranscriptMoment {
   reason: string
 }
 
-/** data/videos/<id>/signals.json: cached raw signal results of the last run. */
+/** One bucket of YouTube's replay heatmap (yt-dlp `heatmap`: start_time, end_time, value). */
+export interface HeatmapMarker {
+  start: number
+  end: number
+  /** 0–1, normalised by YouTube within one video. */
+  value: number
+}
+
+/**
+ * data/videos/<id>/signals.json: raw signal results of the last run. Version 2 (milestone 3) adds the
+ * YouTube replay heatmap; the reader still accepts version 1 files (heatmap null) so cached loudness survives.
+ * Chat density is not cached here: it is recomputed from data/downloads/<id>.live_chat.json each run.
+ */
 export interface SignalsFile {
-  version: 1
+  version: 2
   loudness: LoudnessEnvelope | null
   transcript: { model: string, moments: TranscriptMoment[] } | null
+  /** Raw heatmap from the last successful metadata read (null: none / local video). */
+  heatmap: { markers: HeatmapMarker[], fetchedAt: string } | null
 }

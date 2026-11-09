@@ -47,6 +47,14 @@ _Avoid_: 刪除、rejected
 判斷一段時間是否精彩的一種依據：音量高點、逐字稿內容（由本機 AI 判讀）、聊天室密度或重播熱度。一次分析可能缺少某些訊號，缺少的不扣分。
 _Avoid_: 特徵、指標、feature
 
+**聊天室密度（Chat Density）**:
+YouTube 直播重播的聊天室在某段時間比平常熱烈多少；只有直播重播、聊天室訊息夠多時才有這個訊號。
+_Avoid_: 彈幕量、chat activity
+
+**重播熱度（Replay Heatmap）**:
+YouTube 統計的「觀眾最常重看哪一段」；只有觀看次數夠多的 YouTube 影片才有這個訊號。
+_Avoid_: 熱點圖、Most replayed
+
 **精華分數（Highlight Score）**:
 把各訊號合成後，代表一個精華片段有多精彩的單一數值。
 _Avoid_: 評分、rating

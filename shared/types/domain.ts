@@ -11,7 +11,8 @@ export type AnalysisStatus = 'queued' | 'running' | 'done' | 'failed'
 /**
  * Steps of one Analysis, in run order. A 'full' run: probe → extract-audio → transcribe →
  * prepare-preview → signals → candidates. A 'highlights' run: extract-audio (skipped when the
- * loudness is cached) → signals → candidates. Milestone 3 adds download (YouTube).
+ * loudness is cached) → signals → candidates. A YouTube video's 'full' run starts with download
+ * (metadata, the video file unless it is already on disk, the live chat replay); 'highlights' never downloads.
  */
 export type AnalysisStep =
   | 'download'
@@ -37,7 +38,7 @@ export const ANALYSIS_VERSION = 2
 /** `error` of an Analysis or Clip whose job was cancelled (e.g. the video was removed mid-run). */
 export const CANCELLED_MESSAGE = '已取消'
 
-/** The four Signals of GLOSSARY.md. Milestone 2 has loudness and transcript; milestone 3 adds chat and heatmap. */
+/** The four Signals of GLOSSARY.md. chat and heatmap exist only for YouTube videos. */
 export type SignalKind = 'loudness' | 'transcript' | 'chat' | 'heatmap'
 
 /**
@@ -102,19 +103,55 @@ export interface AnalysisState {
   finishedAt: string | null
 }
 
+/** yt-dlp's live_status. Only not_live and was_live can be added (design.md「YouTube」). */
+export type YoutubeLiveStatus = 'not_live' | 'was_live' | 'post_live' | 'is_live' | 'is_upcoming'
+
+/** YouTube metadata kept with a Source Video (refreshed by every metadata read of an Analysis). */
+export interface YoutubeMeta {
+  /** 11-character YouTube video id. */
+  id: string
+  channel: string | null
+  /** From YouTube; lets the UI show the length before the file is downloaded and probed. */
+  durationSec: number | null
+  liveStatus: YoutubeLiveStatus | null
+  /** YYYY-MM-DD. */
+  uploadDate: string | null
+  /** The metadata lists a live chat replay. */
+  chatAvailable: boolean
+  /** The metadata has a replay heatmap ("Most replayed"). */
+  heatmapAvailable: boolean
+}
+
+/** POST /api/youtube/probe result: what the YouTube tab shows before adding. */
+export interface YoutubeInfo extends YoutubeMeta {
+  /** Canonical https://www.youtube.com/watch?v=<id>. */
+  url: string
+  title: string
+  /** Preselected Language from the video's language metadata (zh* → zh, en* → en), else null. */
+  languageHint: Language | null
+  /** Id of the Source Video that already is this YouTube video, else null. */
+  inLibraryVideoId: string | null
+}
+
 export interface SourceVideo {
   id: string
   title: string
   sourceKind: SourceKind
   /** Absolute path of the video file; null until a YouTube download finishes. */
   filePath: string | null
+  /** Canonical watch URL for YouTube videos. */
   youtubeUrl: string | null
+  /** YouTube metadata; null for local files. */
+  youtube: YoutubeMeta | null
   language: Language
   /** Audio track used for transcription (and later, signals). Preview and Clips use track 0. */
   audioTrack: number
   media: MediaInfo | null
   analysis: AnalysisState
-  /** True when filePath is set but the file no longer exists on disk. */
+  /**
+   * True when filePath is set but the file no longer exists on disk. For YouTube: the downloaded file
+   * was deleted; a 'full' run downloads it again (false before the first download finishes).
+   */
   fileMissing: boolean
   createdAt: string
 }
@@ -212,13 +249,20 @@ export interface SystemInfo {
 // ---- API request bodies ----
 
 export interface AddVideoBody {
-  sourceKind: 'watch-folder' | 'upload'
+  sourceKind: SourceKind
   /** For watch-folder: absolute path inside a configured Watch Folder. */
   filePath?: string
   /** For upload: id returned by POST /api/uploads. */
   uploadId?: string
+  /** For youtube: a single-video YouTube link (any accepted form; design.md「YouTube」). */
+  youtubeUrl?: string
   language: Language
+  /** Must be 0 for youtube (the download has one audio track). */
   audioTrack: number
+}
+
+export interface YoutubeProbeBody {
+  url: string
 }
 
 export interface UploadResult {

@@ -21,6 +21,12 @@ export interface AppConfig {
   videoEncoderOverride: 'h264_nvenc' | 'libx264' | null
   /** Local LLM for the transcript Signal; url null = GG_OLLAMA_URL=off. */
   ollama: OllamaConfig
+  /** <rootDir>/tools: the yt-dlp managed by the app (uv tool dir, bin dir, update-check stamp). */
+  toolsDir: string
+  /** argv prefix of yt-dlp: GG_YTDLP_CMD, else <toolsDir>/bin/yt-dlp(.exe). */
+  ytdlpCommand: string[]
+  /** True when GG_YTDLP_CMD is unset/blank: start.mjs installs and updates <toolsDir>'s yt-dlp. */
+  ytdlpManaged: boolean
 }
 
 export const DEFAULT_ASR_MODELS: Record<Language, string> = {
@@ -66,7 +72,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
     asrDevice: device === 'cuda' || device === 'cpu' ? device : 'auto',
     videoEncoderOverride: encoder === 'h264_nvenc' || encoder === 'libx264' ? encoder : null,
     ollama: parseOllamaConfig(env),
+    ...ytdlpConfig(env, rootDir),
   }
+}
+
+/** GG_YTDLP_CMD (same JSON/space rules as GG_TRANSCRIBER_CMD); blank = unset = the managed install. */
+function ytdlpConfig(env: NodeJS.ProcessEnv, rootDir: string): Pick<AppConfig, 'toolsDir' | 'ytdlpCommand' | 'ytdlpManaged'> {
+  const toolsDir = path.resolve(rootDir, 'tools')
+  const custom = (env.GG_YTDLP_CMD ?? '').trim()
+  if (custom) return { toolsDir, ytdlpCommand: parseCommand(custom), ytdlpManaged: false }
+  const exe = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp'
+  return { toolsDir, ytdlpCommand: [path.join(toolsDir, 'bin', exe)], ytdlpManaged: true }
 }
 
 /** Where the server listens unless HOST / PORT say otherwise: this computer only (design.md). */
@@ -97,6 +113,11 @@ export function videoWorkDir(config: AppConfig, videoId: string): string {
 
 export function clipsDir(config: AppConfig, videoId: string): string {
   return path.join(config.dataDir, 'clips', videoId)
+}
+
+/** File whose presence/time records the last yt-dlp update check (scripts/ytdlp.mjs). */
+export function ytdlpStampPath(config: AppConfig): string {
+  return path.join(config.toolsDir, '.yt-dlp-checked')
 }
 
 export function uploadsDir(config: AppConfig): string {
