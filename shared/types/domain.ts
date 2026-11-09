@@ -9,9 +9,9 @@ export type Language = 'zh' | 'en'
 export type AnalysisStatus = 'queued' | 'running' | 'done' | 'failed'
 
 /**
- * Steps of one Analysis, in run order. Milestone 1 runs probe → extract-audio →
- * transcribe → prepare-preview. Later milestones add download (YouTube),
- * signals and candidates.
+ * Steps of one Analysis, in run order. A 'full' run: probe → extract-audio → transcribe →
+ * prepare-preview → signals → candidates. A 'highlights' run: extract-audio (skipped when the
+ * loudness is cached) → signals → candidates. Milestone 3 adds download (YouTube).
  */
 export type AnalysisStep =
   | 'download'
@@ -21,6 +21,29 @@ export type AnalysisStep =
   | 'prepare-preview'
   | 'signals'
   | 'candidates'
+
+/**
+ * 'full' = transcribe again and find highlights; 'highlights' = keep the Transcript (and the user's
+ * edits) and only find highlights again. The first Analysis of a video is always 'full'.
+ */
+export type AnalysisMode = 'full' | 'highlights'
+
+/**
+ * Version of the Analysis pipeline. 1 = milestone 1 (Transcript only), 2 = milestone 2 (Signals and
+ * candidate Highlights). A done Analysis with a lower version gets a "find highlights" banner.
+ */
+export const ANALYSIS_VERSION = 2
+
+/** The four Signals of GLOSSARY.md. Milestone 2 has loudness and transcript; milestone 3 adds chat and heatmap. */
+export type SignalKind = 'loudness' | 'transcript' | 'chat' | 'heatmap'
+
+export interface SignalState {
+  kind: SignalKind
+  /** 'used' = it contributed to the Highlight Score; 'missing' = not available this time (no penalty). */
+  status: 'used' | 'missing'
+  /** zh-TW note for the user: why it is missing, or a caveat when used (e.g. "2 個區段讀取失敗"). */
+  reason: string | null
+}
 
 export type HighlightStatus = 'candidate' | 'selected' | 'dismissed'
 
@@ -55,6 +78,12 @@ export interface MediaInfo {
 
 export interface AnalysisState {
   status: AnalysisStatus
+  /** Mode of the current / last run. */
+  mode: AnalysisMode
+  /** ANALYSIS_VERSION of the last run that finished ('done'); null while never finished. */
+  version: number | null
+  /** Signals of the last run that reached the candidates step; null before that. */
+  signals: SignalState[] | null
   step: AnalysisStep | null
   /** Overall progress of the whole Analysis, 0–1. */
   progress: number
@@ -139,6 +168,27 @@ export interface Settings {
   watchFolders: string[]
 }
 
+export type OllamaStatus =
+  /** Reachable, new enough, model pulled. */
+  | 'ready'
+  /** GG_OLLAMA_URL=off. */
+  | 'disabled'
+  /** Nothing answers at the URL (not installed or not running). */
+  | 'unreachable'
+  /** Older than the minimum version (0.31.2). */
+  | 'outdated'
+  /** Running, but the model is not pulled. */
+  | 'model-missing'
+
+export interface OllamaInfo {
+  /** Base URL, e.g. http://127.0.0.1:11434; null when disabled. */
+  url: string | null
+  model: string
+  status: OllamaStatus
+  /** Ollama's version when reachable. */
+  version: string | null
+}
+
 export interface SystemInfo {
   version: string
   videoEncoder: 'h264_nvenc' | 'libx264'
@@ -146,6 +196,7 @@ export interface SystemInfo {
   videoEncoderForced: boolean
   dataDir: string
   fontsReady: boolean
+  ollama: OllamaInfo
 }
 
 // ---- API request bodies ----
@@ -184,4 +235,8 @@ export interface CreateClipBody {
 
 export interface UpdateSegmentBody {
   text: string
+}
+
+export interface ReanalyzeBody {
+  mode: AnalysisMode
 }
