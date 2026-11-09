@@ -2,10 +2,11 @@ import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { TranscriptMoment } from '../signals/types'
+import { momentsTrack } from '../signals/tracks'
 import { startFakeOllama } from './test-helpers/fake-ollama.mjs'
 import type { FakeOllama, FakeOllamaOptions } from './test-helpers/fake-ollama.mjs'
 import {
-  buildChunkMessages, CHAT_OPTIONS, chunkSchema, chunkTranscript, cleanReason, mergeMoments, parseChunkResponse,
+  buildChunkMessages, CHAT_OPTIONS, chunkSchema, chunkTranscript, cleanReason, dedupeMoments, parseChunkResponse, subtractSpans,
   readTranscriptWithLlm,
 } from './transcript-signal'
 import type { TranscriptChunk } from './transcript-signal'
@@ -106,7 +107,9 @@ describe('buildChunkMessages', () => {
     expect(system!.role).toBe('system')
     expect(system!.content).toContain('遊戲實況')
     expect(system!.content).toContain('「行號|文字」')
-    expect(system!.content).toContain('6 分以下不要回傳')
+    // 以下 includes the number in Taiwan usage: the prompt must not tell the model to drop the 6 the code keeps
+    expect(system!.content).toContain('3. score 是 1 到 10 的整數：9–10 是整場最精彩，7–8 值得剪，6 是可以考慮；5 分以下（含 5 分）不要回傳。')
+    expect(system!.content).not.toContain('6 分以下')
     expect(system!.content).toContain('20 字以內')
     expect(system!.content).toContain('{"highlights":[{"startLine"')
     expect(user).toEqual({ role: 'user', content: '以下是逐字稿，共 2 行（行號 1 到 2）：\n1|大家好\n2|哈哈 哈 好扯' })
@@ -185,22 +188,39 @@ describe('parseChunkResponse', () => {
   })
 })
 
-describe('mergeMoments', () => {
+describe('dedupeMoments', () => {
   const m = (start: number, end: number, score: number, reason = `${start}`): TranscriptMoment => ({ start, end, score, reason })
 
-  it('keeps the higher score when two moments overlap by more than half of the shorter one', () => {
-    expect(mergeMoments([m(10, 20, 0.6, 'low'), m(12, 22, 0.9, 'high')])).toEqual([m(12, 22, 0.9, 'high')])
-    // 4 s inside a 30 s moment: more than half of the shorter one.
-    expect(mergeMoments([m(0, 30, 0.9), m(10, 14, 0.7)])).toEqual([m(0, 30, 0.9)])
+  it('keeps overlapping moments: a partial and a full detection of one event cover the union', () => {
+    // chunk 1 ends at 600 s and cuts the event off; chunk 2 (60 s overlap) sees all of it
+    const partial = m(560, 600, (8 - 1) / 9, 'cut off')
+    const full = m(555, 625, (7 - 1) / 9, 'whole')
+    const moments = dedupeMoments([partial, full])
+    expect(moments).toEqual([full, partial])
+    const track = momentsTrack(moments, 700)
+    expect(track[557]).toBeCloseTo(6 / 9, 5)
+    expect(track[580]).toBeCloseTo(7 / 9, 5) // overlaps take the max
+    expect(track[610]).toBeCloseTo(6 / 9, 5)
+    // nested: the wider, lower one still counts outside the short, higher one
+    const nested = momentsTrack(dedupeMoments([m(100, 140, 5 / 9), m(130, 135, 7 / 9)]), 200)
+    expect(nested[110]).toBeCloseTo(5 / 9, 5)
+    expect(nested[132]).toBeCloseTo(7 / 9, 5)
   })
 
-  it('keeps both when they overlap by half or less, and sorts by start', () => {
-    expect(mergeMoments([m(15, 25, 0.9), m(10, 20, 0.6)])).toEqual([m(10, 20, 0.6), m(15, 25, 0.9)])
-    expect(mergeMoments([m(30, 40, 0.5), m(0, 10, 0.5)])).toEqual([m(0, 10, 0.5), m(30, 40, 0.5)])
+  it('removes exact duplicates from overlapping chunks, keeping the higher score (the first on a tie), sorted by start', () => {
+    expect(dedupeMoments([m(5, 9, 0.7, 'a'), m(5, 9, 0.7, 'b')])).toEqual([m(5, 9, 0.7, 'a')])
+    expect(dedupeMoments([m(30, 40, 0.5), m(5, 9, 0.6, 'low'), m(5, 9, 0.9, 'high')])).toEqual([m(5, 9, 0.9, 'high'), m(30, 40, 0.5)])
   })
+})
 
-  it('removes exact duplicates from overlapping chunks (the first wins a tie)', () => {
-    expect(mergeMoments([m(5, 9, 0.7, 'a'), m(5, 9, 0.7, 'b')])).toEqual([m(5, 9, 0.7, 'a')])
+describe('subtractSpans', () => {
+  it('keeps the parts outside every cut, sorted and merged', () => {
+    expect(subtractSpans([{ start: 540, end: 1139 }, { start: 1080, end: 1499 }], [{ start: 0, end: 599 }])).toEqual([{ start: 599, end: 1499 }])
+    expect(subtractSpans([{ start: 0, end: 100 }], [{ start: 20, end: 30 }, { start: 50, end: 60 }])).toEqual([
+      { start: 0, end: 20 }, { start: 30, end: 50 }, { start: 60, end: 100 },
+    ])
+    expect(subtractSpans([{ start: 10, end: 20 }], [{ start: 0, end: 30 }])).toEqual([])
+    expect(subtractSpans([], [{ start: 0, end: 30 }])).toEqual([])
   })
 })
 
@@ -217,7 +237,7 @@ describe('readTranscriptWithLlm against the fake Ollama', () => {
     expect(body.model).toBe(MODEL)
     expect(body.think).toBe(false)
     expect(body.stream).toBe(true)
-    expect(body.keep_alive).toBe('10m')
+    expect(body.keep_alive).toBe('1m')
     expect(body.format).toEqual(chunkSchema(4))
     expect(body.options).toEqual({ num_ctx: 16384, temperature: 0.2, top_p: 0.8, top_k: 20, presence_penalty: 0, num_predict: 768, seed: 42 })
     expect(body.messages).toEqual(buildChunkMessages({ firstLine: 0, lines: shortTranscript }))
@@ -256,7 +276,7 @@ describe('readTranscriptWithLlm against the fake Ollama', () => {
   it('is used with no moments when the model finds nothing', async () => {
     const config = await startFake({ scenario: 'empty' })
     const result = await run(config, shortTranscript).promise
-    expect(result).toEqual({ state: { kind: 'transcript', status: 'used', reason: null }, moments: [], model: MODEL })
+    expect(result).toEqual({ state: { kind: 'transcript', status: 'used', reason: null }, moments: [], unread: [], model: MODEL })
   })
 
   it.each([
@@ -267,7 +287,7 @@ describe('readTranscriptWithLlm against the fake Ollama', () => {
     const config = await startFake({ scenario })
     const { promise, logs, progress } = run(config, shortTranscript)
     const result = await promise
-    expect(result).toEqual({ state: { kind: 'transcript', status: 'missing', reason }, moments: [], model: MODEL })
+    expect(result).toEqual({ state: { kind: 'transcript', status: 'missing', reason }, moments: [], unread: [], model: MODEL })
     expect(chatRequests().map(r => r.body.options.temperature)).toEqual([0.2, 0])
     expect(chatRequests()[1]!.body.options).toEqual({ ...CHAT_OPTIONS, temperature: 0 })
     expect(unloadRequests()).toHaveLength(1)
@@ -295,6 +315,8 @@ describe('readTranscriptWithLlm against the fake Ollama', () => {
     const result = await promise
     expect(result.state).toEqual({ kind: 'transcript', status: 'used', reason: '2 個區段讀取失敗' })
     expect(result.moments.map(m => m.start)).toEqual([100, 560])
+    // chunks: [0, 599] read; [540, 1139] and [1080, 1499] skipped → the AI said nothing about 599–1499
+    expect(result.unread).toEqual([{ start: 599, end: 1499 }])
     expect(chatRequests()).toHaveLength(1 + 2 * 2)
     expect(unloadRequests()).toHaveLength(1)
   })
@@ -313,7 +335,7 @@ describe('readTranscriptWithLlm against the fake Ollama', () => {
   ] as const)('is missing without reading when the probe fails (%s)', async (scenario, reason) => {
     const config = await startFake({ scenario })
     const result = await run(config, shortTranscript).promise
-    expect(result).toEqual({ state: { kind: 'transcript', status: 'missing', reason }, moments: [], model: MODEL })
+    expect(result).toEqual({ state: { kind: 'transcript', status: 'missing', reason }, moments: [], unread: [], model: MODEL })
     expect(chatRequests()).toHaveLength(0)
   })
 

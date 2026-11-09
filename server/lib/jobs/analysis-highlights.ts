@@ -6,7 +6,7 @@ import { buildCandidates } from '../highlights'
 import { readTranscriptWithLlm } from '../llm'
 import type { TranscriptSignalResult } from '../llm'
 import { extractAudio } from '../media'
-import { loudnessTrack, momentsTrack, readLoudnessEnvelope, readSignalsFile, writeSignalsFile } from '../signals'
+import { coverageMask, loudnessTrack, momentsTrack, readLoudnessEnvelope, readSignalsFile, writeSignalsFile } from '../signals'
 import type { LoudnessEnvelope, NamedTrack } from '../signals'
 import { SIGNALS_STEP_SHARES } from './analysis-steps'
 import type { AnalysisRun } from './analysis-steps'
@@ -125,12 +125,18 @@ export async function computeSignals(run: AnalysisRun, input: LoudnessInput): Pr
   return { envelope: loudness.envelope, transcript, states: [loudness.state, transcript.state] }
 }
 
-/** Per-second tracks of the Signals used this run; a missing Signal is left out (no penalty). */
+/**
+ * Per-second tracks of the Signals used this run; a missing Signal is left out (no penalty), and so
+ * are the stretches of the Transcript the LLM could not read (a skipped chunk is not "nothing found").
+ */
 export function signalTracks(outcome: SignalsOutcome, durationSec: number): NamedTrack[] {
   const tracks: NamedTrack[] = []
   if (outcome.envelope) tracks.push({ kind: 'loudness', values: loudnessTrack(outcome.envelope, durationSec) })
-  if (outcome.transcript.state.status === 'used') {
-    tracks.push({ kind: 'transcript', values: momentsTrack(outcome.transcript.moments, durationSec) })
+  const { transcript } = outcome
+  if (transcript.state.status === 'used') {
+    const track: NamedTrack = { kind: 'transcript', values: momentsTrack(transcript.moments, durationSec) }
+    if (transcript.unread.length > 0) track.covered = coverageMask(transcript.unread, durationSec)
+    tracks.push(track)
   }
   return tracks
 }

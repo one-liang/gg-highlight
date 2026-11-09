@@ -1,5 +1,6 @@
 // Minimal Ollama HTTP client: probe (version + model), streaming chat, unload.
 // Ollama API facts this relies on: docs/adr/0002-ollama-qwen-transcript-signal.md, design.md「訊號」.
+import { TRANSCRIPT_SIGNAL_DISABLED_REASON } from '../../../shared/types/domain'
 import { MIN_OLLAMA_VERSION } from './types'
 import type { OllamaConfig, OllamaProbe } from './types'
 
@@ -154,7 +155,7 @@ export function describeOllamaProbe(config: OllamaConfig, probe: OllamaProbe): s
     case 'ready':
       return null
     case 'disabled':
-      return '已關閉 AI 讀逐字稿（GG_OLLAMA_URL=off）'
+      return TRANSCRIPT_SIGNAL_DISABLED_REASON
     case 'unreachable':
       return `連不到 Ollama（${config.url}），請確認 Ollama 已啟動`
     case 'outdated':

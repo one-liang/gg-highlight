@@ -3,6 +3,7 @@ import type { Language } from '../../../shared/types/domain'
 import type { RawSegment, RawTranscript, RawWord } from '../transcription/protocol'
 import { rawTranscriptSchema } from '../transcription/schema'
 import { cleanRawTranscript, type CleanupReport, formatCleanupReport } from './cleanup'
+import { cuesForRange } from './cues'
 import { buildTranscriptSegments } from './segments'
 import { hasContent } from './text'
 
@@ -82,6 +83,16 @@ const stockPhraseCases: Case[] = [
   ['Amara variant: a core match removes only its clause', [seg([...zw('好那我們下次見，', 1), ...zw(['字幕', '提供', '：', 'Am', 'ara', '.', 'org', ' ', '社群'], 3, 0.2)])], ['好那我們下次見，']],
   ['明鏡與點點 inside running speech (no pause or punctuation) removes the clause', [seg(zw('打賞支持明鏡與點點欄目', 5, 0.1))], []],
   ['Simplified credit', [seg(zw('字幕由Amara.org社区提供', 5, 0.1))], []],
+  // faster-whisper zh: token pieces, a space carried on the next token, contiguous word times, no punctuation
+  ['a credit glued after speech removes only itself', [seg(zw(['我們', '下次', '見', ' 請', '不', '吝', '點', '贊', ' 訂閱', ' 轉', '發', ' 打', '賞', '支持', '明', '鏡', '與', '點', '點', '欄', '目'], 100, 0.25))], ['我們下次見']],
+  ['an Amara credit glued after speech removes only itself', [seg(zw(['好', '那', '今天', '先', '到', '這邊', ' 字幕', '由', 'Am', 'ara', '.', 'org', '社', '區', '提供'], 100, 0.25))], ['好那今天先到這邊']],
+  ['an Amara credit glued before speech removes only itself', [seg(zw(['字幕', '由', 'Am', 'ara', '.', 'org', '社', '區', '提供', ' 大家', '好', '歡迎', '回來', '今天', '要', '玩', '皮', '克', '公園'], 100, 0.25))], ['大家好歡迎回來今天要玩皮克公園']],
+  ['a core stops at a Whisper space between Chinese characters', [seg(zw(['好', '那', '今天', '先', '到', '這邊', ' 請', '不', '吝', '點', '贊', '訂閱'], 100, 0.25))], ['好那今天先到這邊']],
+  ['a core takes at most 6 characters on each side of it', [seg(zw('大家好歡迎回來今天要玩皮克公園明鏡與點點我們先過去那邊看看', 100, 0.25))], ['大家好歡迎回來今天邊看看']],
+  ['en: a latin core matches whole words only (Tamara organized)', [seg(ew(' My friend Tamara organized the whole raid for us.', 1))], ['My friend Tamara organized the whole raid for us.'], 'en'],
+  ['en: Tamara organized it. is kept', [seg(ew(' Tamara organized it. Thank you.', 1))], ['Tamara organized it. Thank you.'], 'en'],
+  ['en: Samara organically is kept', [seg(ew(' We flew to Samara organically grown stuff there.', 1))], ['We flew to Samara organically grown stuff there.'], 'en'],
+  ['en: a core takes at most 3 words on each side of it', [seg(ew(' I really want to say thanks to the Amara.org team for this video today', 1))], ['I really want to say video today'], 'en'],
   ['謝謝觀看 alone with low probability → dropped', [seg(zw('謝謝觀看', 30, 0.2, 0.3))], []],
   ['謝謝觀看 alone with high probability → kept', [seg(zw('謝謝觀看', 30, 0.2, 0.95))], ['謝謝觀看']],
   ['en: Thank you. with high probability kept', [seg(ew(' Thank you.', 1, 0.3, 0.9))], ['Thank you.'], 'en'],
@@ -93,14 +104,27 @@ const duplicateCases: Case[] = [
   ['an overlapping identical segment is dropped', [s1, seg(zw('學習率決定步長', 0.5))], ['學習率決定步長']],
   ['2 identical adjacent segments are kept', [seg(zw('快過來', 0)), seg(zw('快過來', 1))], ['快過來', '快過來']],
   ['identical segments far apart are kept', [s1, seg(zw('學習率決定步長', 30)), seg(zw('學習率決定步長', 60))], ['學習率決定步長', '學習率決定步長', '學習率決定步長']],
+  ['8 identical 0.5 s segments back to back → keep 2', sameRun(8, 0.5, 0), ['我們走吧', '我們走吧']],
+  ['30 identical 1 s segments 0.2 s apart → keep 2', sameRun(30, 1, 0.2), ['我們走吧', '我們走吧']],
+  ['20 identical 2 s segments 0.5 s apart (30 s chunks of BGM) → keep 2', sameRun(20, 2, 0.5), ['我們走吧', '我們走吧']],
+  ['a run of identical segments ends at other text', [...sameRun(4, 1, 0.2), seg(zw('好', 104.8)), ...sameRun(3, 1, 0.2, 105.2)], ['我們走吧', '我們走吧', '好', '我們走吧', '我們走吧']],
+  ['a run of identical segments ends at a gap over 2 s', [...sameRun(4, 1, 0.2), ...sameRun(4, 1, 0.2, 107)], ['我們走吧', '我們走吧', '我們走吧', '我們走吧']],
 ]
+
+/** `count` segments saying 我們走吧, each `length` s long and `gap` s after the one before. */
+function sameRun(count: number, length: number, gap: number, from = 100): RawSegment[] {
+  return Array.from({ length: count }, (_, i) => {
+    const start = +(from + i * (length + gap)).toFixed(3)
+    return seg(zw('我們走吧', start, length / 4))
+  })
+}
 
 const allCases = [...loopCases, ...legitimateCases, ...stockPhraseCases, ...duplicateCases]
 
 /** The user's report: 78×快 with collapsed timestamps inside one raw segment. */
 const userSegment = seg([...zw('我們先過去那邊', 140, 0.25), ...collapsed('快'.repeat(78), 143.2), ...zw('好過來過來', 146, 0.25)])
-/** The same loop as three raw segments of 26×快, all at 143.2. */
-const userTriplet = [0, 1, 2].map(() => seg(collapsed('快'.repeat(26), 143.2), { end: 144.2 }))
+/** The same loop as three raw segments of 26×快, all at 143.2 (faster-whisper: segment end = last word end). */
+const userTriplet = [0, 1, 2].map(() => seg(collapsed('快'.repeat(26), 143.2)))
 
 const NO_CHANGES: CleanupReport = { stockPhrases: 0, silenceDropped: 0, repeatsCollapsed: 0, charsRemoved: 0, duplicatesDropped: 0, segmentsDropped: 0, highCompression: 0 }
 
@@ -187,7 +211,7 @@ describe('cleanRawTranscript', () => {
   describe('the user\'s case: 快 × 78 at 143.2', () => {
     it('one raw segment: the subtitle lines no longer repeat at the same start', () => {
       const before = buildTranscriptSegments(raw([userSegment]), 'zh')
-      expect(duplicateStarts(before)).not.toEqual([]) // the bug as reported
+      expect(before.some(d => /快{5,}/u.test(d.text))).toBe(true) // the bug as reported
 
       const { raw: cleaned, report } = cleanRawTranscript(raw([userSegment]))
       const after = buildTranscriptSegments(cleaned, 'zh')
@@ -203,13 +227,43 @@ describe('cleanRawTranscript', () => {
 
     it('three raw segments of 26×快: one short line is left', () => {
       const before = buildTranscriptSegments(raw(userTriplet), 'zh')
-      expect(duplicateStarts(before)).not.toEqual([])
+      expect(before.filter(d => /快{5,}/u.test(d.text))).toHaveLength(3)
 
       const { raw: cleaned, report } = cleanRawTranscript(raw(userTriplet))
       const after = buildTranscriptSegments(cleaned, 'zh')
       expect(duplicateStarts(after)).toEqual([])
       expect(after).toEqual([{ start: 143.2, end: 144.2, text: '快快快快' }])
       expect(report).toEqual({ ...NO_CHANGES, repeatsCollapsed: 3, charsRemoved: 66, duplicatesDropped: 2, segmentsDropped: 2 })
+    })
+
+    it('a loop that collapsed onto the end of a segment after speech still shows, and is exported', () => {
+      const input = [seg([...zw('我們先過去那邊', 138, 0.25), ...collapsed('快'.repeat(26), 143.2)])]
+      expect(input[0]!.end).toBe(143.2)
+      const after = buildTranscriptSegments(clean(input).raw, 'zh')
+      expect(after).toEqual([
+        { start: 138, end: 139.75, text: '我們先過去那邊' },
+        { start: 143.2, end: 144.2, text: '快快快快' },
+      ])
+      expect(cuesForRange(after, 135, 150).map(c => c.text)).toEqual(['我們先過去那邊', '快快快快'])
+    })
+
+    it('two loop segments at 143.2 that differ at the end become two lines one after the other', () => {
+      const input = [seg(collapsed('快'.repeat(30), 143.2)), seg(collapsed(`${'快'.repeat(30)}走吧`, 143.2))]
+      const after = buildTranscriptSegments(clean(input).raw, 'zh')
+      expect(after).toEqual([
+        { start: 143.2, end: 144.2, text: '快快快快' },
+        { start: 144.2, end: 145.2, text: '快快快快走吧' },
+      ])
+      expect(duplicateStarts(after)).toEqual([])
+      expect(cuesForRange(after, 135, 150).map(c => c.text)).toEqual(['快快快快', '快快快快走吧'])
+    })
+
+    it('no Transcript line ends up with no time on screen', () => {
+      for (const [, input, , language] of [...allCases, ['user', [userSegment], []] as Case, ['triplet', userTriplet, []] as Case]) {
+        for (const segments of [input, clean(input, language).raw.segments]) {
+          for (const d of buildTranscriptSegments(raw(segments, language), language ?? 'zh')) expect(d.end).toBeGreaterThan(d.start)
+        }
+      }
     })
   })
 
@@ -229,9 +283,13 @@ describe('cleanRawTranscript', () => {
       expect([out!.start, out!.end]).toEqual([10, 10.8])
     })
 
-    it('a segment ending in a collapsed loop keeps its end, so the line still shows', () => {
-      const [out] = clean([seg(collapsed('快'.repeat(26), 143.2), { end: 144.2 })]).raw.segments
-      expect([out!.start, out!.end, out!.text]).toEqual([143.2, 144.2, '快快快快'])
+    it('a segment ending in a collapsed loop keeps its end, and its line shows for a second', () => {
+      const [out] = clean([seg(collapsed('快'.repeat(26), 143.2))]).raw.segments
+      expect([out!.start, out!.end, out!.text]).toEqual([143.2, 143.2, '快快快快'])
+      expect(buildTranscriptSegments(raw([out!]), 'zh')).toEqual([{ start: 143.2, end: 144.2, text: '快快快快' }])
+      // a later segment cuts the second short
+      const next = seg(zw('好', 143.6))
+      expect(buildTranscriptSegments(raw([out!, next]), 'zh')[0]).toEqual({ start: 143.2, end: 143.6, text: '快快快快' })
     })
 
     it('stay ordered within every cleaned segment', () => {

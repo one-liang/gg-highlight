@@ -686,21 +686,42 @@ describe('failure, retry and removal', () => {
     expect(['queued', 'running']).toContain(retry.body.analysis.status)
     expect((await waitForAnalysis(id)).analysis.status).toBe('done')
 
-    // A failed full re-analysis: no exports or edits until it is done again; the retry keeps 'full'.
+    // A failed full re-analysis after a finished one: the Transcript, Highlights and Clips stay usable.
     const manual = await api<Highlight>(base, 'POST', `/api/videos/${id}/highlights`, { start: 1, end: 2 })
     expect(manual.status).toBe(200)
     await fsp.writeFile(failMarker, '1')
     expect((await api(base, 'POST', `/api/videos/${id}/reanalyze`, { mode: 'full' })).status).toBe(200)
     expect((await waitForAnalysis(id)).analysis).toMatchObject({ status: 'failed', mode: 'full', version: 2 })
-    const clip = await api(base, 'POST', `/api/highlights/${manual.body.id}/clips`, { layout: 'original', burnSubtitles: true })
-    expect([clip.status, clip.body.statusMessage]).toEqual([409, '影片分析完成後才能輸出剪輯'])
-    const move = await api(base, 'PATCH', `/api/highlights/${manual.body.id}`, { status: 'dismissed' })
-    expect([move.status, move.body.statusMessage]).toEqual([409, '影片分析完成後才能調整精華片段'])
+    const edited = await api<TranscriptSegment>(base, 'PATCH', `/api/videos/${id}/transcript/0`, { text: '失敗之後改的字' })
+    expect([edited.status, edited.body.edited]).toEqual([200, true])
+    expect((await api(base, 'PATCH', `/api/highlights/${manual.body.id}`, { status: 'dismissed' })).status).toBe(200)
+    expect((await api(base, 'POST', `/api/videos/${id}/highlights`, { start: 3, end: 4 })).status).toBe(200)
+    for (let i = 0; i < 2; i++) {
+      const clip = await api(base, 'POST', `/api/highlights/${manual.body.id}/clips`, { layout: 'original', burnSubtitles: true })
+      expect(clip.status).toBe(200)
+    }
+    // 重試 transcribes again: refused while the Transcript is being exported, like 重新分析 (full)
+    const busy = await api(base, 'POST', `/api/videos/${id}/retry`)
+    expect([busy.status, busy.body.statusMessage]).toEqual([409, '這支影片還有剪輯在排隊或輸出中，請等輸出完成再重新辨識語音'])
+    await waitUntil(async () => {
+      const clips = (await api<Clip[]>(base, 'GET', `/api/videos/${id}/clips`)).body
+      return clips.length === 2 && clips.every(c => c.status === 'done')
+    })
+    // 只重新找精華片段 is offered too, and keeps the edit
+    const onlyHighlightsNow = await api<SourceVideo>(base, 'POST', `/api/videos/${id}/reanalyze`, { mode: 'highlights' })
+    expect(onlyHighlightsNow.status).toBe(200)
+    expect((await waitForAnalysis(id)).analysis).toMatchObject({ status: 'done', mode: 'highlights', version: 2 })
+    expect((await api<TranscriptSegment[]>(base, 'GET', `/api/videos/${id}/transcript`)).body[0]).toMatchObject({ text: '失敗之後改的字', edited: true })
+
+    // fails again; the retry keeps 'full' and replaces the edit
+    expect((await api(base, 'POST', `/api/videos/${id}/reanalyze`, { mode: 'full' })).status).toBe(200)
+    expect((await waitForAnalysis(id)).analysis).toMatchObject({ status: 'failed', mode: 'full', version: 2 })
     await fsp.rm(failMarker)
     expect((await api<SourceVideo>(base, 'POST', `/api/videos/${id}/retry`)).body.analysis.mode).toBe('full')
     expect((await waitForAnalysis(id)).analysis.status).toBe('done')
     const kept = (await api<Highlight[]>(base, 'GET', `/api/videos/${id}/highlights`)).body
     expect(kept.map(x => x.id)).toContain(manual.body.id)
+    expect((await api<TranscriptSegment[]>(base, 'GET', `/api/videos/${id}/transcript`)).body.every(seg => !seg.edited)).toBe(true)
 
     const again = await api(base, 'POST', `/api/videos/${id}/retry`)
     expect(again.status).toBe(409)

@@ -2,13 +2,14 @@
 // The batched GPU pipeline has no anti-hallucination options, and decoding penalties eat real
 // repetition (過來過來, go go go), so this runs afterwards, before buildTranscriptSegments:
 //   1. stock phrases that are never spoken here (subtitle credits, channel plugs) are cut out
+//      (a known phrase exactly; a core with the few words of its clause around it)
 //   2. segments that look like silence (noSpeechProb / avgLogprob) are dropped
 //   3. runaway repetition (快 × 78) is shortened to a few copies
 //   4. removed characters take their word timestamps with them; empty segments are dropped
 //   5. repeated identical segments are dropped
 // Pure: the input is not mutated, and cleaning a cleaned transcript changes nothing.
 import type { RawSegment, RawTranscript, RawWord } from '../transcription/protocol'
-import { hasContent, isTight } from './text'
+import { hasContent, isSpace, isTight } from './text'
 
 export interface CleanupReport {
   /** Stock-phrase hallucinations removed: each removed stretch of text, or a whole low-confidence segment. */
@@ -58,6 +59,11 @@ const HIGH_COMPRESSION_RATIO = 2.4
 const CLAUSE_PAUSE_SECONDS = 0.4
 /** Punctuation that ends a clause (colons bind a credit to its name, so they do not). */
 const CLAUSE_PUNCT = /[。！？!?.．｡，、；,;…⋯—]/u
+/**
+ * How far a stock-phrase core takes its clause with it on each side: 6 CJK characters or 3 latin
+ * words (a word counts 2). Whisper often writes no punctuation, so a clause can be a whole segment.
+ */
+const MAX_CLAUSE_SPREAD = 6
 
 // Phrases are compared after normalize(): NFKC, lower case, letters and digits only.
 /** Stock phrases Whisper writes over silence or music: removed wherever they appear. */
@@ -67,7 +73,7 @@ const STOCK_PHRASES = [
   '優優獨播劇場yoyotelevisionseriesexclusive', '优优独播剧场yoyotelevisionseriesexclusive',
   'subtitlesbytheamaraorgcommunity', 'transcribedbyhttpsotterai',
 ]
-/** Cores of stock phrases nobody says in a stream: removed together with the clause around them. */
+/** Cores of stock phrases nobody says in a stream: removed together with the clause around them (up to MAX_CLAUSE_SPREAD). */
 const STOCK_PHRASE_CORES = [
   '明鏡與點點', '明镜与点点', '請不吝點贊', '请不吝点赞', '點贊訂閱轉發打賞', '点赞订阅转发打赏',
   '字幕志願者', '字幕志愿者', '優優獨播劇場', '优优独播剧场', 'yoyotelevisionseries', 'amaraorg',
@@ -84,13 +90,13 @@ const LOW_CONFIDENCE_PHRASES = new Set([
 export function cleanRawTranscript(raw: RawTranscript): { raw: RawTranscript, report: CleanupReport } {
   const report = emptyReport()
   const segments: RawSegment[] = []
-  const spoken: RawSegment[] = [] // kept segments with text, for the duplicate rule
+  const repeats = new RepeatTracker()
   for (const seg of raw?.segments ?? []) {
     if (!seg) continue
     if ((seg.compressionRatio ?? 0) > HIGH_COMPRESSION_RATIO) report.highCompression++
     let cleaned = cleanSegment(seg, report)
     const hasText = !!cleaned && normalize(cleaned.text) !== ''
-    if (cleaned && hasText && repeatsPrevious(spoken, cleaned)) {
+    if (cleaned && hasText && repeats.isRepeat(cleaned)) {
       report.duplicatesDropped++
       cleaned = null
     }
@@ -99,7 +105,7 @@ export function cleanRawTranscript(raw: RawTranscript): { raw: RawTranscript, re
       continue
     }
     segments.push(cleaned)
-    if (hasText) spoken.push(cleaned)
+    if (hasText) repeats.kept(cleaned)
   }
   return { raw: { ...raw, segments }, report }
 }
@@ -154,21 +160,31 @@ function isLowConfidence(seg: RawSegment): boolean {
     || (seg.avgLogprob ?? 0) <= LOW_CONFIDENCE_AVG_LOGPROB
 }
 
-/** Same text as the last kept segment and overlapping it, or the third such segment in a row. */
-function repeatsPrevious(kept: RawSegment[], seg: RawSegment): boolean {
-  const text = normalize(seg.text)
-  const prev = kept.at(-1)
-  if (!prev || normalize(prev.text) !== text) return false
-  if (overlaps(prev, seg)) return true
-  let run = 1
-  let next = seg
-  for (let k = kept.length - 1; k >= 0; k--) {
-    const cur = kept[k]!
-    if (normalize(cur.text) !== text || next.start - cur.end > SAME_SEGMENT_GAP_SECONDS) break
-    run++
-    next = cur
+/**
+ * The duplicate rule: a segment with the same text as the last kept one that overlaps it, or the
+ * third or later of a run of identical segments each starting within SAME_SEGMENT_GAP_SECONDS of
+ * the one before. The run counts the original neighbours, dropped ones included, so a long run of
+ * identical segments keeps its first two, not every other one.
+ */
+class RepeatTracker {
+  private lastKept: RawSegment | null = null
+  private last: { text: string, end: number } | null = null
+  private run = 0
+
+  /** Call for every segment with text, in order; true = drop it. */
+  isRepeat(seg: RawSegment): boolean {
+    const text = normalize(seg.text)
+    const continues = !!this.last && this.last.text === text && seg.start - this.last.end <= SAME_SEGMENT_GAP_SECONDS
+    this.run = continues ? this.run + 1 : 1
+    this.last = { text, end: seg.end }
+    const prev = this.lastKept
+    const overlapsKept = !!prev && normalize(prev.text) === text && overlaps(prev, seg)
+    return overlapsKept || this.run > MAX_SAME_SEGMENTS
   }
-  return run > MAX_SAME_SEGMENTS
+
+  kept(seg: RawSegment): void {
+    this.lastKept = seg
+  }
 }
 
 /** `seg` starts before `prev` ends, or both start together (zero-length segments at one instant too). */
@@ -281,38 +297,67 @@ function toUnits(chars: Char[]): Unit[] {
 
 // ---------- rule: stock phrases ----------
 
+/**
+ * Units of the stock phrases in the text. An exact STOCK_PHRASES match removes only itself. A core
+ * found outside an exact match also removes the rest of its clause, at most MAX_CLAUSE_SPREAD on
+ * each side, so a credit glued to real speech (Whisper writes no punctuation and contiguous word
+ * times) does not take the speech with it. Matches must start and end on unit boundaries, so the
+ * latin core "amaraorg" matches "Amara.org" but not "Tamara organized".
+ */
 function stockPhraseUnits({ units, chars }: TextStream, timeOf: TimeOf): Set<number> {
   const keys = units.map(u => lettersOnly(u.key))
   const joined = keys.join('')
   const unitAt = keys.flatMap((key, u) => Array.from({ length: key.length }, () => u))
+  const wholeUnits = (from: number, to: number) =>
+    (from === 0 || unitAt[from - 1] !== unitAt[from]) && (to === joined.length - 1 || unitAt[to + 1] !== unitAt[to])
   const drop = new Set<number>()
   const add = (from: number, to: number) => {
     for (let u = from; u <= to; u++) drop.add(u)
   }
   const pauseAfter = (u: number) => timeOf(units[u + 1]!)[0] - timeOf(units[u]!)[1] >= CLAUSE_PAUSE_SECONDS
+  const tightSpaceAfter = (u: number) => isTightUnit(units[u]!, chars) && isTightUnit(units[u + 1]!, chars)
+    && units[u]!.chars.some(c => isSpace(chars[c]!.ch))
   const endsClause = (u: number) =>
-    u >= units.length - 1 || units[u]!.chars.some(c => CLAUSE_PUNCT.test(chars[c]!.ch)) || pauseAfter(u)
+    u >= units.length - 1 || units[u]!.chars.some(c => CLAUSE_PUNCT.test(chars[c]!.ch)) || tightSpaceAfter(u) || pauseAfter(u)
+  const spreadCost = (u: number) => (units[u]!.kind === 'word' ? 2 : 1)
 
+  const exact: Array<[number, number]> = []
   for (const phrase of STOCK_PHRASES) {
-    for (const [from, to] of findAll(joined, phrase)) add(unitAt[from]!, unitAt[to]!)
+    for (const [from, to] of findAll(joined, phrase, wholeUnits)) {
+      exact.push([from, to])
+      add(unitAt[from]!, unitAt[to]!)
+    }
   }
   for (const core of STOCK_PHRASE_CORES) {
-    for (const [from, to] of findAll(joined, core)) {
+    for (const [from, to] of findAll(joined, core, wholeUnits)) {
+      if (exact.some(([a, b]) => a <= from && to <= b)) continue
       let a = unitAt[from]!
       let b = unitAt[to]!
-      while (a > 0 && !endsClause(a - 1)) a--
-      while (!endsClause(b)) b++
+      for (let budget = MAX_CLAUSE_SPREAD; a > 0 && !endsClause(a - 1) && spreadCost(a - 1) <= budget; a--) budget -= spreadCost(a - 1)
+      for (let budget = MAX_CLAUSE_SPREAD; !endsClause(b) && spreadCost(b + 1) <= budget; b++) budget -= spreadCost(b + 1)
       add(a, b)
     }
   }
   return drop
 }
 
-/** [first, last] index of every non-overlapping occurrence of `needle`. */
-function findAll(haystack: string, needle: string): Array<[number, number]> {
+/** A CJK character unit (not a letter of a long latin run split into characters). */
+function isTightUnit(unit: Unit, chars: Char[]): boolean {
+  return unit.kind === 'char' && isTight(chars[unit.content[0]!]!.ch)
+}
+
+/** [first, last] index of every non-overlapping occurrence of `needle` that `accept` agrees to. */
+function findAll(haystack: string, needle: string, accept: (from: number, to: number) => boolean): Array<[number, number]> {
   const found: Array<[number, number]> = []
-  for (let at = haystack.indexOf(needle); at >= 0; at = haystack.indexOf(needle, at + needle.length)) {
-    found.push([at, at + needle.length - 1])
+  for (let at = haystack.indexOf(needle); at >= 0;) {
+    const to = at + needle.length - 1
+    if (accept(at, to)) {
+      found.push([at, to])
+      at = haystack.indexOf(needle, to + 1)
+    }
+    else {
+      at = haystack.indexOf(needle, at + 1)
+    }
   }
   return found
 }

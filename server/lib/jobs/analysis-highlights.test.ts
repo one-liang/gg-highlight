@@ -6,11 +6,13 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import type { AnalysisMode, AnalysisState, Highlight, Language } from '../../../shared/types/domain'
-import { LOUDNESS_REASON } from '../highlights'
+import { checkReanalyze, requireTranscriptReady, transcriptReady } from '../api'
+import { buildCandidates, LOUDNESS_REASON } from '../highlights'
 import { DEFAULT_OLLAMA_MODEL } from '../llm'
 import { type FakeOllama, startFakeOllama } from '../llm/test-helpers/fake-ollama.mjs'
 import { readSignalsFile } from '../signals'
 import { AnalysisQueue, analysisFiles } from './analysis'
+import { signalTracks, type SignalsOutcome } from './analysis-highlights'
 import { CANCELLED_MESSAGE, MISSING_SOURCE_MESSAGE } from './errors'
 import { createJobTestEnv, fakeTranscriberCommand, type JobTestEnv, makeBurstVideo, waitFor } from './test-helpers/setup'
 
@@ -154,7 +156,7 @@ describe('full Analysis with Signals', () => {
     // version → tags → one chunk → unload, with the transcript lines as "n|text"
     expect(ollama.requests.map(r => r.path)).toEqual(['/api/version', '/api/tags', '/api/chat', '/api/chat'])
     const [chat] = chatRequests()
-    expect(chat!.body).toMatchObject({ model: DEFAULT_OLLAMA_MODEL, think: false, stream: true, keep_alive: '10m' })
+    expect(chat!.body).toMatchObject({ model: DEFAULT_OLLAMA_MODEL, think: false, stream: true, keep_alive: '1m' })
     expect(JSON.stringify(chat!.body.messages)).toContain('3|Wow, that was an amazing shot!')
     expect(unloadRequests()).toHaveLength(1)
     expect(logs).toContainEqual(`[analysis ${video.id}] 找到 1 個候選精華片段（依據音量、逐字稿）`)
@@ -319,6 +321,33 @@ describe('highlights-only Analysis', () => {
   })
 })
 
+describe('signalTracks: an LLM chunk that could not be read', () => {
+  // 30 minutes at -30 dBFS with a shout (+9 dB) at 1000–1011 s, inside chunk 2 (540–1140 s), which failed twice
+  const durationSec = 1800
+  const envelope = { db: Array.from({ length: durationSec }, (_, i) => (i >= 1000 && i < 1012 ? -21 : -30)) }
+  const moments = [{ start: 100, end: 130, score: 6 / 9, reason: '大笑' }, { start: 1500, end: 1530, score: 6 / 9, reason: '尖叫' }]
+  const outcome = (transcript: SignalsOutcome['transcript']): SignalsOutcome => ({ envelope, transcript, states: [] })
+  const used = { kind: 'transcript', status: 'used', reason: '1 個區段讀取失敗' } as const
+  const candidatesOf = (o: SignalsOutcome) => buildCandidates({ durationSec, segments: [], tracks: signalTracks(o, durationSec), moments: o.transcript.moments, occupied: [] })
+
+  it('leaves the unread seconds to the other Signals: a loudness peak there scores as if the AI Signal were missing', () => {
+    const skipped = outcome({ state: used, moments, unread: [{ start: 599, end: 1139 }], model: DEFAULT_OLLAMA_MODEL })
+    const missing = outcome({ state: { kind: 'transcript', status: 'missing', reason: 'x' }, moments: [], unread: [], model: DEFAULT_OLLAMA_MODEL })
+    const [, transcript] = signalTracks(skipped, durationSec)
+    expect(transcript!.covered![700]).toBe(0)
+    expect(transcript!.covered![200]).toBe(1)
+
+    const shout = (list: ReturnType<typeof buildCandidates>) => list.find(c => c.start <= 1000 && c.end >= 1011)
+    const loudnessOnly = shout(candidatesOf(missing))
+    expect(loudnessOnly).toBeDefined()
+    expect(shout(candidatesOf(skipped))).toEqual(loudnessOnly)
+    // read by the AI but found nothing there: the same shout counts a third as much (and is not picked)
+    const readAll = outcome({ state: used, moments, unread: [], model: DEFAULT_OLLAMA_MODEL })
+    expect(signalTracks(readAll, durationSec)[1]!.covered).toBeUndefined()
+    expect(shout(candidatesOf(readAll))?.score ?? 0).toBeLessThan(loudnessOnly!.score)
+  })
+})
+
 describe('cancel, shutdown and recover while the LLM reads', () => {
   it('cancel during a hanging Ollama request: 已取消, and the model is still unloaded', async () => {
     ollama.setScenario('hang')
@@ -334,6 +363,42 @@ describe('cancel, shutdown and recover while the LLM reads', () => {
     expect(unloadRequests()).toHaveLength(1)
     expect(fs.existsSync(analysisFiles(env, video.id).audio)).toBe(false)
     expect(env.repos.highlights.listByVideo(video.id)).toEqual([])
+  })
+
+  it('cancel during a full re-run of an analysed video: the Transcript, Highlights and 只重新找精華片段 stay available', async () => {
+    const video = await addVideo()
+    await runToEnd(makeQueue())
+    await queues[0]!.stop()
+    const transcript = env.repos.transcript.list(video.id)
+    const highlights = env.repos.highlights.listByVideo(video.id)
+    expect(highlights.length).toBeGreaterThan(0)
+
+    ollama.setScenario('hang')
+    const queue = makeQueue()
+    queue.start()
+    const chatsBefore = chatRequests().length
+    queue.enqueue(video.id, 'full')
+    expect(transcriptReady(env.repos.videos.get(video.id)!)).toBe(false) // queued: about to be replaced
+    await waitFor(() => chatRequests().length > chatsBefore)
+    await queue.cancel(video.id)
+
+    const cancelled = env.repos.videos.get(video.id)!
+    expect(cancelled.analysis).toMatchObject({ status: 'failed', mode: 'full', error: CANCELLED_MESSAGE, version: 2 })
+    // the new Transcript came in complete before the AI step, and nothing else changed
+    expect(env.repos.transcript.list(video.id).map(s => s.text)).toEqual(transcript.map(s => s.text))
+    expect(env.repos.highlights.listByVideo(video.id)).toEqual(highlights)
+    expect(transcriptReady(cancelled)).toBe(true)
+    expect(() => requireTranscriptReady(cancelled, 'editTranscript')).not.toThrow()
+    expect(() => requireTranscriptReady(cancelled, 'export')).not.toThrow()
+    expect(() => checkReanalyze(cancelled, 'highlights', { activeClips: 0, sourceExists: true })).not.toThrow()
+
+    env.repos.transcript.updateText(video.id, 0, '取消之後改的字')
+    ollama.setScenario('ok')
+    const rerun = makeQueue()
+    rerun.enqueue(video.id, 'highlights')
+    await runToEnd(rerun)
+    expect(env.repos.videos.get(video.id)!.analysis).toMatchObject({ status: 'done', mode: 'highlights', version: 2 })
+    expect(env.repos.transcript.list(video.id)[0]).toMatchObject({ text: '取消之後改的字', edited: true })
   })
 
   it('shutdown during a highlights-only run leaves it running; recover() re-runs it in the same mode, keeping the edits', async () => {
@@ -357,11 +422,26 @@ describe('cancel, shutdown and recover while the LLM reads', () => {
     ollama.setScenario('ok')
     const queue = makeQueue({ transcriber: 'fail' })
     expect(await queue.recover()).toEqual([video.id])
+    // interrupted while the LLM read: the model it may have left in GPU memory is unloaded first
+    expect(unloadRequests()).toHaveLength(3)
+    expect(logs).toContain('[analysis] 已卸載上次中斷時留在顯示卡的 Ollama 模型')
     expect(env.repos.videos.get(video.id)!.analysis).toMatchObject({ status: 'queued', mode: 'highlights' })
     expect(env.repos.transcript.list(video.id)).toEqual(transcript)
     await runToEnd(queue)
     expect(env.repos.videos.get(video.id)!.analysis).toMatchObject({ status: 'done', mode: 'highlights', error: null })
     expect(env.repos.transcript.list(video.id)).toEqual(transcript)
+  })
+
+  it('recover() unloads the model only for a run interrupted in the signals step, and never with Ollama off', async () => {
+    const atTranscribe = await addVideo()
+    env.repos.videos.updateAnalysis(atTranscribe.id, { status: 'running', step: 'transcribe' })
+    expect(await makeQueue().recover()).toEqual([atTranscribe.id])
+    expect(ollama.requests).toEqual([])
+
+    const atSignals = await addVideo({ copy: true })
+    env.repos.videos.updateAnalysis(atSignals.id, { status: 'running', step: 'signals' })
+    expect(await makeQueue({ ollamaUrl: null }).recover()).toEqual([atSignals.id])
+    expect(ollama.requests).toEqual([])
   })
 
   it('enqueue stores the mode; without one the video keeps its mode (retry)', async () => {

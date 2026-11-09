@@ -1,6 +1,6 @@
 // Turning job failures into messages a user can read (no stack traces, always Chinese context).
 
-export const CANCELLED_MESSAGE = '已取消'
+export { CANCELLED_MESSAGE } from '../../../shared/types/domain'
 export const MISSING_SOURCE_MESSAGE = '找不到原始影片檔'
 const MAX_MESSAGE_CHARS = 1200
 const CJK_RE = /[㐀-鿿豈-﫿]/u

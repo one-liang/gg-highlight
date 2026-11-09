@@ -208,7 +208,8 @@ describe('normalizeWatchFolders', () => {
 })
 
 describe('re-analysis rules', () => {
-  const video = (status: AnalysisStatus, mode: AnalysisMode) => ({ analysis: { status, mode } })
+  /** `version` null = no Analysis of this video has finished yet (a first run). */
+  const video = (status: AnalysisStatus, mode: AnalysisMode, version: number | null = null) => ({ analysis: { status, mode, version } })
   const statuses: AnalysisStatus[] = ['queued', 'running', 'done', 'failed']
 
   it('transcriptReady: a done Analysis, or any highlights-only run', () => {
@@ -216,6 +217,20 @@ describe('re-analysis rules', () => {
       expect(transcriptReady(video(status, 'highlights')), status).toBe(true)
       expect(transcriptReady(video(status, 'full')), status).toBe(status === 'done')
     }
+  })
+
+  it('transcriptReady: a full re-run that failed (or was cancelled) after an earlier Analysis finished', () => {
+    for (const version of [1, 2]) {
+      expect(transcriptReady(video('failed', 'full', version)), `v${version}`).toBe(true)
+      // queued or running: the Transcript is about to be replaced
+      expect(transcriptReady(video('queued', 'full', version))).toBe(false)
+      expect(transcriptReady(video('running', 'full', version))).toBe(false)
+    }
+    // a first Analysis that failed never made a Transcript
+    expect(transcriptReady(video('failed', 'full', null))).toBe(false)
+    expect(() => requireTranscriptReady(video('failed', 'full', 2), 'export')).not.toThrow()
+    expect(() => checkReanalyze(video('failed', 'full', 2), 'highlights', { activeClips: 0, sourceExists: false })).not.toThrow()
+    expect(statusOf(() => checkReanalyze(video('failed', 'full', 2), 'full', { activeClips: 1, sourceExists: true }))).toEqual({ statusCode: 409, statusMessage: REANALYZE_CLIPS_BUSY_MESSAGE })
   })
 
   it('requireTranscriptReady answers a 409 with the route\'s message', () => {

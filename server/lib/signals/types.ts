@@ -7,6 +7,11 @@ export type SignalTrack = Float32Array
 export interface NamedTrack {
   kind: SignalKind
   values: SignalTrack
+  /**
+   * 1 for the seconds this Signal has a value for, 0 where it has none (e.g. an LLM chunk that could
+   * not be read): there it is left out of the weighting like a missing Signal. Absent = every second.
+   */
+  covered?: Uint8Array
 }
 
 /** Fixed relative weights (design.md「訊號」); only the tracks present in a run are renormalized. */

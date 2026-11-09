@@ -34,22 +34,40 @@ export function momentsTrack(moments: TranscriptMoment[], durationSec: number): 
 }
 
 /**
- * Weighted average of the given tracks (SIGNAL_WEIGHTS, renormalised over the tracks given, so a
- * missing signal does not lower the score), then a centred moving average of `smoothSec` seconds.
- * Values are clamped to 0–1 (NaN counts as 0); a track shorter than ceil(durationSec) counts as 0
- * past its end. No tracks → all zeros.
+ * Per-second coverage mask: 0 for every second that touches one of `gaps` (as in momentsTrack),
+ * 1 elsewhere. Spans with non-finite numbers are skipped.
+ */
+export function coverageMask(gaps: Array<{ start: number, end: number }>, durationSec: number): Uint8Array {
+  const mask = new Uint8Array(trackLength(durationSec)).fill(1)
+  for (const gap of gaps) {
+    if (!Number.isFinite(gap.start) || !Number.isFinite(gap.end) || gap.end <= gap.start) continue
+    const first = Math.max(0, Math.floor(gap.start))
+    const last = Math.min(mask.length - 1, Math.ceil(gap.end) - 1)
+    for (let i = first; i <= last; i++) mask[i] = 0
+  }
+  return mask
+}
+
+/**
+ * Weighted average of the given tracks (SIGNAL_WEIGHTS, renormalised per second over the tracks that
+ * cover that second, so a missing signal, or a second a signal has no value for, does not lower the
+ * score), then a centred moving average of `smoothSec` seconds. Values are clamped to 0–1 (NaN counts
+ * as 0); a track shorter than ceil(durationSec) counts as 0 past its end. No tracks → all zeros.
  */
 export function combineTracks(tracks: NamedTrack[], durationSec: number, smoothSec = 5): SignalTrack {
   const length = trackLength(durationSec)
-  const combined = new Float64Array(length)
-  const totalWeight = tracks.reduce((sum, track) => sum + SIGNAL_WEIGHTS[track.kind], 0)
-  if (totalWeight > 0) {
-    for (const { kind, values } of tracks) {
-      const weight = SIGNAL_WEIGHTS[kind] / totalWeight
-      const count = Math.min(length, values.length)
-      for (let i = 0; i < count; i++) combined[i] = combined[i]! + weight * clamp01(values[i])
+  const sums = new Float64Array(length)
+  const weights = new Float64Array(length)
+  for (const { kind, values, covered } of tracks) {
+    const weight = SIGNAL_WEIGHTS[kind]
+    for (let i = 0; i < length; i++) {
+      if (covered && covered[i] === 0) continue
+      weights[i] = weights[i]! + weight
+      if (i < values.length) sums[i] = sums[i]! + weight * clamp01(values[i])
     }
   }
+  const combined = new Float64Array(length)
+  for (let i = 0; i < length; i++) combined[i] = weights[i]! > 0 ? sums[i]! / weights[i]! : 0
   return movingAverage(combined, smoothSec)
 }
 

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { AnalysisMode, SourceVideo, TranscriptSegment } from '~~/shared/types/domain'
-import { countEditedSegments, defaultReanalyzeMode } from '~/utils/analysis'
+import { countEditedSegments, defaultReanalyzeMode, FULL_NEEDS_SOURCE_MESSAGE } from '~/utils/analysis'
 
 const props = defineProps<{
   video: SourceVideo
@@ -29,11 +29,15 @@ const OPTIONS: { value: AnalysisMode, title: string, description: string }[] = [
   {
     value: 'full',
     title: '重新辨識語音並找精華',
-    description: '逐字稿重新產生，你的修改會被覆蓋。要套用新版的逐字稿清理（例如重複出現的字）時用這個。完成前不能修改逐字稿或輸出剪輯。',
+    description: '逐字稿重新產生，你的修改會被覆蓋。要套用新版的逐字稿清理（例如重複出現的字）時用這個。完成前看不到逐字稿、精華片段與剪輯。',
   },
 ]
 
-const recommended = computed<AnalysisMode | null>(() => (loadingTranscript.value ? null : defaultReanalyzeMode(editedCount.value)))
+/** 'full' transcribes the source file again: impossible while it is missing (the API answers 422). */
+const fullUnavailable = computed(() => props.video.fileMissing)
+const isDisabled = (value: AnalysisMode) => value === 'full' && fullUnavailable.value
+
+const recommended = computed<AnalysisMode | null>(() => (loadingTranscript.value ? null : defaultReanalyzeMode(props.video, editedCount.value)))
 
 async function loadEditedCount(videoId: string) {
   const seq = ++loadSeq
@@ -52,25 +56,32 @@ async function loadEditedCount(videoId: string) {
   finally {
     if (seq === loadSeq) {
       loadingTranscript.value = false
-      if (!touched) mode.value = defaultReanalyzeMode(editedCount.value)
+      if (!touched) mode.value = defaultReanalyzeMode(props.video, editedCount.value)
     }
   }
 }
 
 watch(open, (isOpen) => {
   if (!isOpen) return
-  touched = !!props.preset
-  mode.value = props.preset ?? 'highlights'
+  // a preset 'full' (the old-video banner) cannot apply without the source file
+  const preset = props.preset && !isDisabled(props.preset) ? props.preset : null
+  touched = !!preset
+  mode.value = preset ?? 'highlights'
   void loadEditedCount(props.video.id)
 }, { immediate: true })
 
+watch(fullUnavailable, (unavailable) => {
+  if (unavailable && mode.value === 'full') mode.value = 'highlights'
+})
+
 function choose(value: AnalysisMode) {
+  if (isDisabled(value)) return
   touched = true
   mode.value = value
 }
 
 async function submit() {
-  if (pending.value) return
+  if (pending.value || isDisabled(mode.value)) return
   const video = await start(props.video.id, mode.value)
   if (!video) return
   emit('started', video)
@@ -96,14 +107,19 @@ async function submit() {
             <label
               v-for="o in OPTIONS"
               :key="o.value"
-              class="relative flex cursor-pointer gap-3 rounded-lg border p-3 transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-primary"
-              :class="mode === o.value ? 'border-primary bg-primary/5 ring-1 ring-primary' : 'border-default hover:bg-elevated/50'"
+              class="relative flex gap-3 rounded-lg border p-3 transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-primary"
+              :class="[
+                isDisabled(o.value) ? 'cursor-not-allowed border-default opacity-60' : 'cursor-pointer',
+                !isDisabled(o.value) && (mode === o.value ? 'border-primary bg-primary/5 ring-1 ring-primary' : 'border-default hover:bg-elevated/50'),
+              ]"
             >
               <input
                 type="radio"
                 name="reanalyze-mode"
                 :value="o.value"
                 :checked="mode === o.value"
+                :disabled="isDisabled(o.value)"
+                :aria-disabled="isDisabled(o.value) || undefined"
                 class="sr-only"
                 @change="choose(o.value)"
               >
@@ -118,6 +134,9 @@ async function submit() {
                   <UBadge v-if="recommended === o.value" label="建議" size="sm" color="neutral" variant="soft" />
                 </span>
                 <span class="block text-xs leading-relaxed text-muted">{{ o.description }}</span>
+                <span v-if="isDisabled(o.value)" class="flex items-start gap-1 text-xs text-warning">
+                  <UIcon name="i-lucide-file-warning" class="mt-px size-3.5 shrink-0" />{{ FULL_NEEDS_SOURCE_MESSAGE }}
+                </span>
               </span>
             </label>
           </div>
@@ -143,7 +162,7 @@ async function submit() {
           </li>
           <li class="flex gap-2">
             <UIcon name="i-lucide-refresh-cw" class="mt-px size-3.5 shrink-0 text-warning" />
-            <span><span class="font-medium text-highlighted">會被取代：</span>還沒處理的候選（新的候選不會和保留的片段重疊）</span>
+            <span><span class="font-medium text-highlighted">會被取代：</span>還是候選、沒輸出過的片段（調整過起訖點但沒按「選用」的也會被取代）；新的候選不會和保留的片段重疊</span>
           </li>
         </ul>
       </div>

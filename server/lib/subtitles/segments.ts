@@ -34,6 +34,9 @@ const COST_WORD = 10
 const COST_PIECE = 4
 // Safety bound for degenerate input (thousands of punctuation-only words with no duration).
 const MAX_WORDS_PER_PIECE = 200
+/** A line shorter than this has collapsed word timestamps; it is shown for COLLAPSED_LINE_SECONDS. */
+const MIN_LINE_SECONDS = 0.2
+const COLLAPSED_LINE_SECONDS = 1
 
 const round3 = (x: number) => Math.round(x * 1000) / 1000
 
@@ -46,10 +49,12 @@ const round3 = (x: number) => Math.round(x * 1000) / 1000
 export function buildTranscriptSegments(raw: RawTranscript, language: Language): SegmentDraft[] {
   const clean = language === 'zh' ? cleanZhText : cleanEnText
   const drafts: SegmentDraft[] = []
-  for (const seg of raw?.segments ?? []) {
-    if (!seg) continue
-    drafts.push(...splitTokens(segmentTokens(seg, language), clean, seg))
-  }
+  const segments = (raw?.segments ?? []).filter((seg): seg is RawSegment => !!seg)
+  segments.forEach((seg, k) => {
+    // Where this segment's speech must stop at the latest: the next segment, or the end of the audio.
+    const nextStart = k + 1 < segments.length ? segments[k + 1]!.start : raw?.durationSec
+    drafts.push(...splitTokens(segmentTokens(seg, language), clean, typeof nextStart === 'number' && Number.isFinite(nextStart) ? nextStart : null))
+  })
   return resolveOverlaps(drafts)
 }
 
@@ -207,8 +212,11 @@ function pieceCost(units: number, seconds: number): number {
   return COST_PIECE + 4 * fill * fill + 2 * span * span + short
 }
 
-/** Dynamic programming over word boundaries: every piece within the limits, minimum total cost. */
-function splitTokens(tokens: Token[], clean: (text: string) => string, seg: RawSegment): SegmentDraft[] {
+/**
+ * Dynamic programming over word boundaries: every piece within the limits, minimum total cost.
+ * `nextStart` is where the next raw segment starts (or the audio ends); null when unknown.
+ */
+function splitTokens(tokens: Token[], clean: (text: string) => string, nextStart: number | null): SegmentDraft[] {
   const n = tokens.length
   if (!n) return []
   const best = new Array<number>(n + 1).fill(Number.POSITIVE_INFINITY)
@@ -251,19 +259,25 @@ function splitTokens(tokens: Token[], clean: (text: string) => string, seg: RawS
     const timed = spoken.length ? spoken : group
     const start = Math.min(...timed.map(t => t.start))
     let end = Math.max(...timed.map(t => t.end))
-    if (end - start < 0.2) {
-      // Collapsed word timestamps: keep the line up a little, at most until the next piece.
+    if (end - start < MIN_LINE_SECONDS) {
+      // Collapsed word timestamps (a loop often collapses onto the segment's end, so the segment end
+      // says nothing): keep the line up for a second, at most until the next piece or segment. When
+      // that one starts at the same instant, resolveOverlaps shows the lines one after the other.
       const nextPiece = pieces[idx + 1]
-      const segEnd = Number.isFinite(seg.end) ? seg.end : end
-      const limit = nextPiece ? tokens[nextPiece[0]]!.start : Math.max(segEnd, end)
-      end = Math.max(end, Math.min(start + 1, limit))
+      const next = nextPiece ? tokens[nextPiece[0]]!.start : nextStart
+      const limit = next !== null && next > start ? next : start + COLLAPSED_LINE_SECONDS
+      end = Math.max(end, Math.min(start + COLLAPSED_LINE_SECONDS, limit))
     }
     drafts.push({ start: round3(start), end: round3(end), text })
   })
   return drafts
 }
 
-/** Sorts by time and trims/shifts so no two segments overlap. */
+/**
+ * Sorts by time and trims/shifts so no two segments overlap. A segment that starts together with
+ * the one before is moved after it and keeps up to a second of its own length, so it never ends up
+ * with no time on screen (and so is never left out of a Clip's subtitles).
+ */
 function resolveOverlaps(drafts: SegmentDraft[]): SegmentDraft[] {
   const sorted = drafts.map(d => ({ ...d })).sort((a, b) => a.start - b.start || a.end - b.end)
   for (let k = 1; k < sorted.length; k++) {
@@ -274,8 +288,9 @@ function resolveOverlaps(drafts: SegmentDraft[]): SegmentDraft[] {
       prev.end = cur.start
     }
     else {
+      const length = cur.end - cur.start
       cur.start = prev.end
-      cur.end = Math.max(cur.end, cur.start)
+      cur.end = round3(Math.max(cur.end, cur.start + Math.min(COLLAPSED_LINE_SECONDS, length)))
     }
   }
   return sorted

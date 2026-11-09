@@ -7,6 +7,7 @@ import {
   emptyTabText,
   END_SLACK_SECONDS,
   filterHighlights,
+  goneHighlightRefs,
   highlightsForTab,
   isOverShortsLimit,
   sortByScore,
@@ -194,5 +195,19 @@ describe('status helpers', () => {
     expect(validRange(1, 2)).toEqual({ start: 1, end: 2 })
     expect(validRange(null, 2)).toBeNull()
     expect(validRange(3, 2)).toBeNull()
+  })
+})
+
+describe('goneHighlightRefs (a highlights-only run replaced candidates)', () => {
+  const list = [{ id: 'kept' }, { id: 'new' }]
+
+  it('flags the Highlight being adjusted, exported or focused when it is no longer listed', () => {
+    expect(goneHighlightRefs(list, { editing: 'old', exporting: 'old', focused: 'old' })).toEqual({ editing: true, exporting: true, focused: true })
+    expect(goneHighlightRefs([], { editing: 'old', exporting: null, focused: null })).toEqual({ editing: true, exporting: false, focused: false })
+  })
+
+  it('leaves references to listed Highlights, and empty ones, alone', () => {
+    expect(goneHighlightRefs(list, { editing: 'kept', exporting: 'new', focused: 'kept' })).toEqual({ editing: false, exporting: false, focused: false })
+    expect(goneHighlightRefs(list, { editing: null, exporting: null, focused: null })).toEqual({ editing: false, exporting: false, focused: false })
   })
 })

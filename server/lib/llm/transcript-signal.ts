@@ -1,12 +1,12 @@
 // The transcript Signal: the local LLM reads the Transcript in chunks and names highlight line ranges
 // (design.md「訊號」→ 逐字稿, ADR-0002). Line numbers become seconds here, never in the model.
 import { z } from 'zod'
-import type { Language, SignalState } from '../../../shared/types/domain'
+import { type Language, type SignalState, TRANSCRIPT_SIGNAL_EMPTY_REASON } from '../../../shared/types/domain'
 import type { TranscriptMoment } from '../signals/types'
 import { toTaiwanTraditional } from '../subtitles'
 import { chatStream, describeOllamaProbe, OllamaError, OllamaStreamError, OllamaTimeoutError, probeOllama, unloadModel } from './ollama'
 import type { ChatMessage, ChatRequest } from './ollama'
-import type { OllamaConfig, ReadTranscriptOptions, TranscriptLine, TranscriptSignalResult } from './types'
+import type { OllamaConfig, ReadTranscriptOptions, TimeSpan, TranscriptLine, TranscriptSignalResult } from './types'
 
 export const CHUNK_WINDOW_SEC = 600
 export const CHUNK_OVERLAP_SEC = 60
@@ -22,7 +22,12 @@ export const MIN_SCORE = 6
 export const CHUNK_TIMEOUT_MS = 10 * 60_000
 /** On cancel, wait at most this long for the unload reply so cancelling stays quick. */
 const ABORT_UNLOAD_TIMEOUT_MS = 1000
-export const KEEP_ALIVE = '10m'
+/**
+ * How long Ollama keeps the model loaded after a request. Chunk requests go back to back, so the model
+ * never expires mid-run; if the app dies before its unload (window closed mid-step), the ~7 GB leave
+ * the 8 GB card after a minute instead of competing with the next game, OBS or transcription.
+ */
+export const KEEP_ALIVE = '1m'
 /** Sampling options for every chunk; num_ctx never changes so Ollama never reloads the model. */
 export const CHAT_OPTIONS = Object.freeze({
   num_ctx: 16384,
@@ -83,7 +88,7 @@ const SYSTEM_PROMPT = [
   '規則：',
   '1. 用 startLine 與 endLine（包含）表示片段，只能用這段逐字稿裡的行號，startLine 不可大於 endLine。',
   `2. 片段之間不可重疊，最多 ${MAX_HIGHLIGHTS_PER_CHUNK} 個；這段沒有精彩內容就回傳空陣列。`,
-  '3. score 是 1 到 10 的整數：9–10 是整場最精彩，7–8 值得剪，6 分以下不要回傳。',
+  `3. score 是 1 到 10 的整數：9–10 是整場最精彩，7–8 值得剪，${MIN_SCORE} 是可以考慮；${MIN_SCORE - 1} 分以下（含 ${MIN_SCORE - 1} 分）不要回傳。`,
   '4. reason 用一句台灣繁體中文（正體字，不要簡體字），20 字以內，說明這段為什麼好看。',
   '只輸出 JSON，格式：{"highlights":[{"startLine":起始行號,"endLine":結束行號,"reason":"一句理由","score":分數}]}',
 ].join('\n')
@@ -191,23 +196,45 @@ export function parseChunkResponse(content: string, chunk: TranscriptChunk): Tra
   return moments
 }
 
-function overlapsMostly(a: TranscriptMoment, b: TranscriptMoment): boolean {
-  const overlap = Math.min(a.end, b.end) - Math.max(a.start, b.start)
-  const shorter = Math.min(a.end - a.start, b.end - b.start)
-  return overlap > 0 && overlap > 0.5 * shorter
+/**
+ * Removes exact duplicates (same start and end, e.g. one event reported by two overlapping chunks
+ * with the same lines), keeping the higher score (the earlier one on a tie); sorted by start.
+ * Overlapping moments are all kept: momentsTrack takes the maximum per second and the candidates
+ * step picks the best-scoring reason, so a range cut off at a chunk edge never hides the full one.
+ */
+export function dedupeMoments(moments: TranscriptMoment[]): TranscriptMoment[] {
+  const best = new Map<string, TranscriptMoment>()
+  for (const moment of moments) {
+    const key = `${moment.start}|${moment.end}`
+    const seen = best.get(key)
+    if (!seen || moment.score > seen.score) best.set(key, moment)
+  }
+  return [...best.values()].sort((a, b) => a.start - b.start || a.end - b.end)
 }
 
-/**
- * Removes duplicates from overlapping chunks: when two moments overlap by more than half of the
- * shorter one, the higher score wins (the earlier one on a tie). Result is sorted by start.
- */
-export function mergeMoments(moments: TranscriptMoment[]): TranscriptMoment[] {
-  const byScore = [...moments].sort((a, b) => b.score - a.score || a.start - b.start)
-  const kept: TranscriptMoment[] = []
-  for (const moment of byScore) {
-    if (!kept.some(k => overlapsMostly(k, moment))) kept.push(moment)
+/** From the first line's start to the latest line end of a chunk. */
+function chunkSpan(chunk: TranscriptChunk): TimeSpan {
+  return { start: chunk.lines[0]!.start, end: Math.max(...chunk.lines.map(line => line.end)) }
+}
+
+/** The parts of `spans` outside every span of `minus`, sorted and merged. */
+export function subtractSpans(spans: TimeSpan[], minus: TimeSpan[]): TimeSpan[] {
+  const out: TimeSpan[] = []
+  for (const span of [...spans].sort((a, b) => a.start - b.start)) {
+    let pieces: TimeSpan[] = [{ ...span }]
+    for (const cut of minus) {
+      pieces = pieces.flatMap((p) => {
+        if (cut.end <= p.start || cut.start >= p.end) return [p]
+        return [{ start: p.start, end: cut.start }, { start: cut.end, end: p.end }].filter(q => q.end > q.start)
+      })
+    }
+    for (const p of pieces) {
+      const last = out.at(-1)
+      if (last && p.start <= last.end) last.end = Math.max(last.end, p.end)
+      else out.push(p)
+    }
   }
-  return kept.sort((a, b) => a.start - b.start || a.end - b.end)
+  return out
 }
 
 /** Short zh-TW cause of a chunk failure, for logs and the 'missing' reason. */
@@ -282,13 +309,13 @@ export async function readTranscriptWithLlm(
   const progress = (fraction: number) => safeCall(opts.onProgress, fraction)
   const missing = (reason: string): TranscriptSignalResult => {
     progress(1)
-    return { state: signalState('missing', reason), moments: [], model: config.model }
+    return { state: signalState('missing', reason), moments: [], unread: [], model: config.model }
   }
 
   signal.throwIfAborted()
   if (!config.url) return missing(describeOllamaProbe(config, { status: 'disabled', version: null })!)
   const chunks = chunkTranscript(lines)
-  if (chunks.length === 0) return missing('逐字稿沒有內容')
+  if (chunks.length === 0) return missing(TRANSCRIPT_SIGNAL_EMPTY_REASON)
 
   const probe = await probeOllama(config, { signal, fetch: opts.fetch })
   signal.throwIfAborted()
@@ -302,6 +329,8 @@ export async function readTranscriptWithLlm(
   progress(0)
   const moments: TranscriptMoment[] = []
   const failures: string[] = []
+  const read: TimeSpan[] = []
+  const skipped: TimeSpan[] = []
   try {
     for (const [i, chunk] of chunks.entries()) {
       const label = `第 ${i + 1}/${chunks.length} 段`
@@ -310,12 +339,14 @@ export async function readTranscriptWithLlm(
           config, signal, timeoutMs: opts.chunkTimeoutMs ?? CHUNK_TIMEOUT_MS, language: opts.language, fetch: opts.fetch, log, label,
         })
         moments.push(...found)
+        read.push(chunkSpan(chunk))
         log(`AI 讀逐字稿：${label}找到 ${found.length} 個片段`)
       }
       catch (err) {
         if (signal.aborted) throw signal.reason
         const cause = describeChunkFailure(err, config)
         failures.push(cause)
+        skipped.push(chunkSpan(chunk))
         log(`AI 讀逐字稿：${label}讀取失敗，跳過（${cause}）`)
       }
       progress((i + 1) / chunks.length)
@@ -330,5 +361,5 @@ export async function readTranscriptWithLlm(
 
   if (failures.length === chunks.length) return missing(`AI 讀逐字稿失敗：${failures.at(-1)}`)
   const reason = failures.length > 0 ? `${failures.length} 個區段讀取失敗` : null
-  return { state: signalState('used', reason), moments: mergeMoments(moments), model: config.model }
+  return { state: signalState('used', reason), moments: dedupeMoments(moments), unread: subtractSpans(skipped, read), model: config.model }
 }

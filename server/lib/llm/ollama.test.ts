@@ -150,13 +150,13 @@ describe('chatStream', () => {
 
   it('posts stream:true with the model and joins the NDJSON content split over many writes', async () => {
     const config = await startFake()
-    const result = await chatStream(config, { messages, think: false, keep_alive: '10m' })
+    const result = await chatStream(config, { messages, think: false, keep_alive: '1m' })
     expect(result.doneReason).toBe('stop')
     expect(JSON.parse(result.content)).toEqual({
       highlights: [{ startLine: 1, endLine: 2, reason: '大家笑成一团的反应', score: 8 }],
     })
     const body = fake!.requests[0]!.body
-    expect(body).toMatchObject({ model: MODEL, messages, think: false, keep_alive: '10m', stream: true })
+    expect(body).toMatchObject({ model: MODEL, messages, think: false, keep_alive: '1m', stream: true })
   })
 
   it('decodes lines and multi-byte characters split at any byte', async () => {

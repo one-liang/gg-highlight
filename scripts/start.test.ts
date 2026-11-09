@@ -231,6 +231,12 @@ describe('settings', () => {
     expect(serverEnv({ NITRO_SHUTDOWN_TIMEOUT: '10000' }).NITRO_SHUTDOWN_TIMEOUT).toBe('10000')
   })
 
+  it('adds SIGHUP to Nitro\'s shutdown signals (closing the console window on Windows), unless set', () => {
+    // Nitro's default is "SIGTERM SIGINT": SIGHUP would end the server before its close hook unloads the Ollama model.
+    expect(serverEnv({}).NITRO_SHUTDOWN_SIGNALS.split(' ').sort()).toEqual(['SIGHUP', 'SIGINT', 'SIGTERM'])
+    expect(serverEnv({ NITRO_SHUTDOWN_SIGNALS: 'SIGTERM' }).NITRO_SHUTDOWN_SIGNALS).toBe('SIGTERM')
+  })
+
   it('treats being ended by the stop request as a clean exit', () => {
     expect(stopExitCode(0)).toBe(0)
     expect(stopExitCode(null)).toBe(0)

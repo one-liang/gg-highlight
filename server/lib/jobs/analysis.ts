@@ -4,6 +4,7 @@
 import fs from 'node:fs/promises'
 import type { AnalysisMode, AnalysisStep, MediaInfo } from '../../../shared/types/domain'
 import type { VideoRecord } from '../db'
+import { unloadModel } from '../llm'
 import { detectVideoEncoder, encoderFallbackMessage, extractAudio, preparePreview, probeMedia } from '../media'
 import { buildTranscriptSegments, cleanRawTranscript, formatCleanupReport } from '../subtitles'
 import { runTranscriber } from '../transcription'
@@ -18,6 +19,9 @@ import { type JobDeps, type JobDepsInput, type JobQueue, resolveDeps } from './t
 import { abortKind, SerialWorker, throwIfAborted } from './worker'
 
 export { ANALYSIS_STEPS, analysisFiles, SIGNALS_STEP_SHARES } from './analysis-steps'
+
+/** recover() waits at most this long for Ollama to unload a model left by an interrupted run. */
+const RECOVER_UNLOAD_TIMEOUT_MS = 3000
 
 /** Fails with a readable message when the chosen Analysis audio track does not exist. */
 export function checkAudioTrack(media: MediaInfo, audioTrack: number): void {
@@ -207,8 +211,10 @@ export class AnalysisQueue implements JobQueue {
   async recover(): Promise<string[]> {
     const { repos } = this.deps
     const ids: string[] = []
+    let llmInterrupted = false
     for (const video of repos.videos.listByAnalysisStatus('running')) {
       if (video.id === this.runningVideoId) continue
+      if (video.analysis.step === 'signals') llmInterrupted = true
       // Same mode again. The Transcript and preview stay: a 'full' run replaces them at its own
       // steps, a 'highlights' run never touches them.
       repos.videos.updateAnalysis(video.id, { status: 'queued' })
@@ -217,6 +223,11 @@ export class AnalysisQueue implements JobQueue {
     }
     // Leftovers of the interrupted runs (call before start(), so no new run is writing yet).
     for (const id of ids) await removeLeftovers(analysisFiles(this.deps, id).dir, LEFTOVER_PREFIXES)
+    // The app died while the local LLM was reading (e.g. the window was closed): its model may still
+    // hold the GPU memory the re-run's speech recognition needs. Best effort, skipped when Ollama is off.
+    if (llmInterrupted && await unloadModel(this.deps.config.ollama, { fetch: this.deps.fetch, timeoutMs: RECOVER_UNLOAD_TIMEOUT_MS })) {
+      this.deps.log('[analysis] 已卸載上次中斷時留在顯示卡的 Ollama 模型')
+    }
     return ids
   }
 

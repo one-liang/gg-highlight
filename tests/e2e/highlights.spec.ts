@@ -1,6 +1,6 @@
 // Milestone 2 through the UI: candidate Highlights from loudness and the (fake) local LLM → 選用 →
 // export → 重新分析 (只重新找精華片段) keeps the user's work → the model missing in Ollama → the
-// settings row → the old-video banner of a milestone-1 Analysis.
+// settings row → the old-video banner of a milestone-1 Analysis → a failed full re-run keeps the work usable.
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { expect, type Locator, type Page, test, type TestInfo } from '@playwright/test'
@@ -66,6 +66,19 @@ async function reanalyzeHighlightsOnly(page: Page, videoId: string, screenshot?:
   return video
 }
 
+/** Makes the stored Analysis look like a 'full' re-run that failed after an earlier one had finished. */
+function markAsFailedFullRerun(videoId: string, error: string): void {
+  const db = new DatabaseSync(path.join(process.env.GG_E2E_DATA_DIR!, 'gg-highlight.db'))
+  try {
+    db.exec('PRAGMA busy_timeout = 5000')
+    const result = db.prepare(`UPDATE videos SET analysis_status = 'failed', analysis_mode = 'full', analysis_error = ? WHERE id = ? AND analysis_version = 2`).run(error, videoId)
+    expect(result.changes).toBe(1)
+  }
+  finally {
+    db.close()
+  }
+}
+
 /** Makes the stored Analysis look like a milestone-1 one (what the schema-2 migration leaves for those videos). */
 function markAsMilestone1(videoId: string): void {
   const db = new DatabaseSync(path.join(process.env.GG_E2E_DATA_DIR!, 'gg-highlight.db'))
@@ -80,7 +93,7 @@ function markAsMilestone1(videoId: string): void {
 }
 
 test('candidate highlights: pick and export, re-analyse keeping edits, missing model, settings, old-video banner', async ({ page, request }, testInfo) => {
-  // one analysis, one export and four highlights-only runs
+  // one analysis, one export and five highlights-only runs
   test.setTimeout(10 * 60_000)
 
   // ---- the fixtures folder as a Watch Folder (workflow.spec.ts adds it through the settings page) ----
@@ -240,4 +253,28 @@ test('candidate highlights: pick and export, re-analyse keeping edits, missing m
   await expect(bannerTitle).toBeHidden()
   await expect(summary).toContainText('這次的候選依據：音量、逐字稿（AI）')
   await expect(transcript.getByText(EDITED_TEXT, { exact: true })).toBeVisible()
+
+  // ---- a full re-run that failed after the earlier ones finished: the work stays usable ----
+  markAsFailedFullRerun(videoId, '語音辨識失敗：CUDA out of memory')
+  await page.reload()
+  const failedAlert = page.getByTestId('analysis-failed')
+  await expect(failedAlert).toContainText('重新分析失敗')
+  await expect(failedAlert).toContainText('語音辨識失敗：CUDA out of memory')
+  await expect(failedAlert).toContainText('逐字稿、精華片段與剪輯照常可以看、改、輸出。')
+  await expect(failedAlert.getByRole('button', { name: '重試' })).toBeVisible()
+  await expect(transcript.getByText(EDITED_TEXT, { exact: true })).toBeVisible()
+  await highlights.getByRole('tab', { name: /選用/ }).click()
+  await expect(picked).toContainText('已輸出 1 次')
+  await expect(clip.getByRole('link', { name: '下載影片' })).toBeVisible()
+  await shot(page, testInfo, 'm2-failed-full-rerun')
+  // both re-analysis choices are offered; with an edited segment 只重新找精華片段 is preselected
+  await failedAlert.getByRole('button', { name: '重新分析…' }).click()
+  const failedModal = page.getByRole('dialog', { name: '重新分析' })
+  await expect(failedModal.getByRole('radio', { name: /只重新找精華片段/ })).toBeChecked()
+  await expect(failedModal.getByRole('radio', { name: /重新辨識語音並找精華/ })).toBeEnabled()
+  await failedModal.getByRole('button', { name: '取消' }).click()
+  await expect(failedModal).toBeHidden()
+  const recovered = await reanalyzeHighlightsOnly(page, videoId)
+  expect(recovered.analysis).toMatchObject({ status: 'done', mode: 'highlights' })
+  await expect(failedAlert).toHaveCount(0)
 })

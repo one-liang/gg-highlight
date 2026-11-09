@@ -29,7 +29,18 @@ export interface TranscriptSignalResult {
   /** kind 'transcript'; 'missing' with a zh-TW reason telling the user what to do. */
   state: SignalState
   moments: TranscriptMoment[]
+  /**
+   * Seconds the model could not read: the lines of chunks that failed (even after the retry), minus
+   * what an overlapping chunk did read. The Signal has no value there, so it must not count as
+   * "the AI found nothing". Empty when every chunk was read, or when the Signal is 'missing'.
+   */
+  unread: TimeSpan[]
   model: string
+}
+
+export interface TimeSpan {
+  start: number
+  end: number
 }
 
 export interface ReadTranscriptOptions {

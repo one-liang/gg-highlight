@@ -1,4 +1,5 @@
-// The built server on its own: where it listens without HOST, and how fast it stops while a video streams.
+// The built server on its own: where it listens without HOST, how fast it stops while a video streams,
+// and that closing the console window (SIGHUP on Windows) still shuts it down gracefully.
 import fsp from 'node:fs/promises'
 import http from 'node:http'
 import os from 'node:os'
@@ -7,11 +8,13 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { SourceVideo } from '../../shared/types/domain'
 // @ts-ignore -- plain ESM helpers without type declarations
 import { serverEnv } from '../../scripts/start.mjs'
+import { type FakeOllama, startFakeOllama } from '../../server/lib/llm/test-helpers/fake-ollama.mjs'
 import { fixtures } from '../fixtures'
 import { api, ensureBuild, FAKE_TRANSCRIBER, type RunningServer, startServer, waitUntil } from './server'
 
 let tmp: string
 const running: RunningServer[] = []
+const ollamas: FakeOllama[] = []
 
 beforeAll(async () => {
   await ensureBuild()
@@ -20,6 +23,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await Promise.all(running.map(s => s.stop()))
+  await Promise.all(ollamas.map(o => o.close()))
   if (tmp) await fsp.rm(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 })
 
@@ -71,5 +75,35 @@ describe('built server', () => {
     // Nitro's default (30 s) outlasted start.mjs's 15 s force kill, so the 'close' hook never ran.
     expect(code).toBe(0)
     expect(elapsed).toBeLessThan(10_000)
+  })
+
+  it('SIGHUP (the console window being closed) shuts down gracefully with the launcher\'s env: the Ollama model is unloaded', async () => {
+    const watchDir = path.join(tmp, 'watch-hup')
+    await fsp.mkdir(watchDir, { recursive: true })
+    const filePath = path.join(watchDir, 'sample-en.mp4')
+    await fsp.copyFile(fixtures().sampleEnMp4, filePath)
+    const ollama = await startFakeOllama({ scenario: 'hang' })
+    ollamas.push(ollama)
+
+    const launcherEnv = serverEnv({}) as Record<string, string>
+    expect(launcherEnv.NITRO_SHUTDOWN_SIGNALS!.split(' ')).toContain('SIGHUP')
+    const server = await startServer({
+      ...baseEnv('hup'),
+      NITRO_SHUTDOWN_TIMEOUT: launcherEnv.NITRO_SHUTDOWN_TIMEOUT!,
+      NITRO_SHUTDOWN_SIGNALS: launcherEnv.NITRO_SHUTDOWN_SIGNALS!,
+      GG_OLLAMA_URL: ollama.url,
+    })
+    running.push(server)
+    expect((await api(server.url, 'PUT', '/api/settings', { watchFolders: [watchDir] })).status).toBe(200)
+    expect((await api(server.url, 'POST', '/api/videos', { sourceKind: 'watch-folder', filePath, language: 'en', audioTrack: 0 })).status).toBe(200)
+    // The AI step is reading (the fake Ollama never answers), as during a long recording.
+    await waitUntil(async () => ollama.requests.some(r => r.path === '/api/chat' && r.body?.messages?.length > 0), 60_000)
+
+    const exited = new Promise<{ code: number | null, signal: string | null }>(resolve => server.child.once('exit', (code, signal) => resolve({ code, signal })))
+    server.child.kill('SIGHUP')
+    const { code, signal } = await exited
+    // Without SIGHUP among Nitro's shutdown signals, Node dies at once (signal SIGHUP) and the model stays loaded.
+    expect({ code, signal }).toEqual({ code: 0, signal: null })
+    expect(ollama.requests.at(-1)?.body).toMatchObject({ messages: [], keep_alive: 0 })
   })
 })

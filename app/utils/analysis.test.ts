@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ANALYSIS_VERSION, type AnalysisState, type Highlight, type SignalState } from '../../shared/types/domain'
+import { ANALYSIS_VERSION, type AnalysisState, CANCELLED_MESSAGE, type Highlight, type SignalState } from '../../shared/types/domain'
 import {
   analysisDoneNotice,
   analysisFailedTitle,
@@ -8,10 +8,14 @@ import {
   countCandidates,
   countEditedSegments,
   defaultReanalyzeMode,
+  failedRunFootnote,
+  isFailedRerun,
   isTranscriptReady,
   needsHighlightsUpgrade,
+  REFILL_TRANSCRIPT_HINT,
   reanalyzeStartedNotice,
   summarizeSignals,
+  transcriptSignalFixable,
 } from './analysis'
 
 function v(partial: Partial<AnalysisState>): { analysis: AnalysisState } {
@@ -36,9 +40,25 @@ describe('transcript readiness', () => {
     expect(isTranscriptReady(v({ status: 'done' }))).toBe(true)
     expect(isTranscriptReady(v({ status: 'done', mode: 'highlights' }))).toBe(true)
     for (const status of ['queued', 'running', 'failed'] as const) {
-      expect(isTranscriptReady(v({ status, mode: 'highlights' })), status).toBe(true)
-      expect(isTranscriptReady(v({ status, mode: 'full' })), status).toBe(false)
+      expect(isTranscriptReady(v({ status, mode: 'highlights', version: null })), status).toBe(true)
+      expect(isTranscriptReady(v({ status, mode: 'full', version: null })), status).toBe(false)
     }
+  })
+
+  it('stays ready when a full re-run failed or was cancelled after an earlier Analysis finished', () => {
+    for (const version of [1, ANALYSIS_VERSION]) {
+      expect(isTranscriptReady(v({ status: 'failed', mode: 'full', version, error: '語音辨識失敗' }))).toBe(true)
+      expect(isTranscriptReady(v({ status: 'failed', mode: 'full', version, error: CANCELLED_MESSAGE }))).toBe(true)
+      // queued or running: the Transcript is about to be replaced
+      expect(isTranscriptReady(v({ status: 'queued', mode: 'full', version }))).toBe(false)
+      expect(isTranscriptReady(v({ status: 'running', mode: 'full', version }))).toBe(false)
+    }
+    // the first Analysis failed: there is no Transcript
+    expect(isTranscriptReady(v({ status: 'failed', mode: 'full', version: null }))).toBe(false)
+    expect(isFailedRerun(v({ status: 'failed', mode: 'full', version: ANALYSIS_VERSION }))).toBe(true)
+    expect(isFailedRerun(v({ status: 'failed', mode: 'full', version: null }))).toBe(false)
+    expect(isFailedRerun(v({ status: 'failed', mode: 'highlights', version: ANALYSIS_VERSION }))).toBe(false)
+    expect(isFailedRerun(v({ status: 'done' }))).toBe(false)
   })
 })
 
@@ -46,22 +66,48 @@ describe('re-analysis', () => {
   it('is offered when done or after a failed highlights-only run, never while queued / running', () => {
     expect(canReanalyze(v({ status: 'done' }))).toBe(true)
     expect(canReanalyze(v({ status: 'done', mode: 'highlights' }))).toBe(true)
-    expect(canReanalyze(v({ status: 'failed', mode: 'highlights' }))).toBe(true)
-    // a failed full run is retried instead
-    expect(canReanalyze(v({ status: 'failed', mode: 'full' }))).toBe(false)
+    expect(canReanalyze(v({ status: 'failed', mode: 'highlights', version: null }))).toBe(true)
+    // a failed first Analysis is retried instead
+    expect(canReanalyze(v({ status: 'failed', mode: 'full', version: null }))).toBe(false)
     for (const mode of ['full', 'highlights'] as const) {
       expect(canReanalyze(v({ status: 'queued', mode }))).toBe(false)
       expect(canReanalyze(v({ status: 'running', mode }))).toBe(false)
     }
   })
 
+  it('is offered (both modes) after a failed or cancelled full re-run of a video analysed before', () => {
+    expect(canReanalyze(v({ status: 'failed', mode: 'full', version: ANALYSIS_VERSION }))).toBe(true)
+    expect(canReanalyze(v({ status: 'failed', mode: 'full', version: 1, error: CANCELLED_MESSAGE }))).toBe(true)
+  })
+
+  const fine = { ...v({}), fileMissing: false }
+  const loudness: SignalState = { kind: 'loudness', status: 'used', reason: null }
+  const withTranscript = (status: SignalState['status'], reason: string | null) =>
+    ({ ...v({ signals: [loudness, { kind: 'transcript', status, reason }] }), fileMissing: false })
+
   it('preselects highlights when any segment was edited, full otherwise', () => {
     expect(countEditedSegments([{ edited: false }, { edited: true }, { edited: true }])).toBe(2)
     expect(countEditedSegments([])).toBe(0)
-    expect(defaultReanalyzeMode(2)).toBe('highlights')
-    expect(defaultReanalyzeMode(0)).toBe('full')
+    expect(defaultReanalyzeMode(fine, 2)).toBe('highlights')
+    expect(defaultReanalyzeMode(fine, 0)).toBe('full')
     // unknown: never overwrite edits by default
-    expect(defaultReanalyzeMode(null)).toBe('highlights')
+    expect(defaultReanalyzeMode(fine, null)).toBe('highlights')
+  })
+
+  it('preselects highlights when the source file is missing (full cannot run)', () => {
+    expect(defaultReanalyzeMode({ ...fine, fileMissing: true }, 0)).toBe('highlights')
+  })
+
+  it('preselects highlights when the AI Signal was missing for a fixable reason (re-transcribing does not help)', () => {
+    expect(defaultReanalyzeMode(withTranscript('missing', '連不到 Ollama（http://127.0.0.1:11434），請確認 Ollama 已啟動'), 0)).toBe('highlights')
+    expect(defaultReanalyzeMode(withTranscript('missing', 'Ollama 裡還沒有 qwen3.5:9b 模型，請執行 ollama pull qwen3.5:9b'), 0)).toBe('highlights')
+    expect(defaultReanalyzeMode(withTranscript('used', null), 0)).toBe('full')
+    expect(defaultReanalyzeMode(withTranscript('used', '2 個區段讀取失敗'), 0)).toBe('full')
+    // turned off on purpose, or nobody spoke: another highlights-only run would not change anything
+    expect(defaultReanalyzeMode(withTranscript('missing', '已關閉 AI 讀逐字稿（GG_OLLAMA_URL=off）'), 0)).toBe('full')
+    expect(defaultReanalyzeMode(withTranscript('missing', '逐字稿沒有內容'), 0)).toBe('full')
+    expect(transcriptSignalFixable(null)).toBe(false)
+    expect(transcriptSignalFixable([loudness])).toBe(false)
   })
 
   it('shows the old-video banner for a done milestone-1 analysis only', () => {
@@ -77,7 +123,7 @@ describe('re-analysis', () => {
   it('confirms which run was queued', () => {
     expect(reanalyzeStartedNotice('highlights').title).toBe('已開始找精華片段')
     expect(reanalyzeStartedNotice('full').title).toBe('已開始重新分析')
-    expect(reanalyzeStartedNotice('full').description).toContain('完成前不能修改逐字稿')
+    expect(reanalyzeStartedNotice('full').description).toContain('完成前看不到逐字稿、精華片段與剪輯')
   })
 })
 
@@ -94,14 +140,20 @@ describe('summarizeSignals', () => {
     expect(summarizeSignals([transcript, loudness])).toEqual({ used: '音量、逐字稿（AI）', notes: [] })
   })
 
-  it('notes a missing Signal with its reason', () => {
+  it('notes a missing Signal with its reason, and how to fill in a missing AI Signal', () => {
     const missing: SignalState = { kind: 'transcript', status: 'missing', reason: '連不到 Ollama（http://127.0.0.1:11434），請確認 Ollama 已啟動' }
     expect(summarizeSignals([loudness, missing])).toEqual({
       used: '音量',
-      notes: [{ kind: 'transcript', missing: true, text: '逐字稿（AI）沒有用到：連不到 Ollama（http://127.0.0.1:11434），請確認 Ollama 已啟動' }],
+      notes: [{ kind: 'transcript', missing: true, text: '逐字稿（AI）沒有用到：連不到 Ollama（http://127.0.0.1:11434），請確認 Ollama 已啟動；處理好之後按「重新分析」→「只重新找精華片段」' }],
     })
+    expect(REFILL_TRANSCRIPT_HINT).toBe('；處理好之後按「重新分析」→「只重新找精華片段」')
     const noReason: SignalState = { kind: 'transcript', status: 'missing', reason: '  ' }
-    expect(summarizeSignals([loudness, noReason])!.notes[0]!.text).toBe('逐字稿（AI）沒有用到')
+    expect(summarizeSignals([loudness, noReason])!.notes[0]!.text).toBe(`逐字稿（AI）沒有用到${REFILL_TRANSCRIPT_HINT}`)
+    // no next step where another run would not help, or for the loudness
+    const off: SignalState = { kind: 'transcript', status: 'missing', reason: '已關閉 AI 讀逐字稿（GG_OLLAMA_URL=off）' }
+    expect(summarizeSignals([loudness, off])!.notes[0]!.text).toBe('逐字稿（AI）沒有用到：已關閉 AI 讀逐字稿（GG_OLLAMA_URL=off）')
+    const noLoudness: SignalState = { kind: 'loudness', status: 'missing', reason: '找不到原始影片檔' }
+    expect(summarizeSignals([noLoudness, transcript])!.notes[0]!.text).toBe('音量沒有用到：找不到原始影片檔')
   })
 
   it('notes a caveat of a used Signal', () => {
@@ -147,9 +199,21 @@ describe('completion notice', () => {
   })
 
   it('names the failed run', () => {
-    expect(analysisFailedTitle('highlights')).toBe('找精華片段失敗')
-    expect(analysisFailedTitle('full')).toBe('分析失敗')
+    const a = (partial: Partial<AnalysisState>) => v({ status: 'failed', error: '語音辨識失敗', ...partial }).analysis
+    expect(analysisFailedTitle(a({ mode: 'highlights' }))).toBe('找精華片段失敗')
+    expect(analysisFailedTitle(a({ mode: 'full', version: null }))).toBe('分析失敗')
+    expect(analysisFailedTitle(a({ mode: 'full', version: ANALYSIS_VERSION }))).toBe('重新分析失敗')
+    expect(analysisFailedTitle(a({ mode: 'full', version: 1, error: CANCELLED_MESSAGE }))).toBe('已取消重新分析')
+    expect(analysisFailedTitle(a({ mode: 'highlights', error: CANCELLED_MESSAGE }))).toBe('已取消找精華片段')
     expect(analysisFailedTitle(undefined)).toBe('分析失敗')
+  })
+
+  it('says the work is intact, and what 重試 does after a failed full re-run', () => {
+    expect(failedRunFootnote(v({ status: 'failed', mode: 'highlights' }))).toEqual(['逐字稿、精華片段與剪輯不受影響，可以照常使用。'])
+    const lines = failedRunFootnote(v({ status: 'failed', mode: 'full', version: ANALYSIS_VERSION }))
+    expect(lines[0]).toBe('逐字稿、精華片段與剪輯照常可以看、改、輸出。')
+    expect(lines[1]).toContain('「重試」會再重新辨識語音一次，之後改過的逐字稿會被覆蓋')
+    expect(lines[1]).toContain('「只重新找精華片段」')
   })
 })
 

@@ -2,15 +2,19 @@
 import type { AnalysisMode, AnalysisState } from '../../../shared/types/domain'
 import { conflict, unprocessable } from './errors'
 
-type WithAnalysis = { analysis: Pick<AnalysisState, 'status' | 'mode'> }
+type WithAnalysis = { analysis: Pick<AnalysisState, 'status' | 'mode' | 'version'> }
 
 /**
- * True when the Transcript can be used and changed: the Analysis is done, or the current / last run
- * only looks for highlights (it never touches the Transcript, even while queued, running or failed).
- * A 'full' run that is queued, running or failed has no usable Transcript yet.
+ * True when the Transcript can be used and changed: the Analysis is done; or the current / last run
+ * only looks for highlights (it never touches the Transcript, even while queued, running or failed);
+ * or a 'full' re-run failed or was cancelled after an earlier Analysis finished (`version` is only set
+ * when a run finishes, never reset): it fails before replacing the Transcript, or after a new complete
+ * one is in, and leaves the Highlights and Clips alone. A queued or running 'full' run is about to
+ * replace the Transcript, and a first Analysis that failed never made one.
  */
 export function transcriptReady(video: WithAnalysis): boolean {
-  return video.analysis.status === 'done' || video.analysis.mode === 'highlights'
+  const { status, mode, version } = video.analysis
+  return status === 'done' || mode === 'highlights' || (status === 'failed' && version !== null)
 }
 
 export const REANALYZE_BUSY_MESSAGE = '這支影片正在排隊或分析中，請等分析結束再重新分析'

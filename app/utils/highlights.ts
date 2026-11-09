@@ -124,3 +124,22 @@ export function validRange(start: number | null, end: number | null): { start: n
   if (start === null || end === null || end <= start) return null
   return { start, end }
 }
+
+export interface HighlightRefs {
+  /** Highlight being adjusted (調整). */
+  editing: string | null
+  /** Highlight whose export dialog is open. */
+  exporting: string | null
+  /** Highlight last touched (marked on the timeline). */
+  focused: string | null
+}
+
+/**
+ * Which of the workspace's references point at a Highlight no longer in `list`: a highlights-only
+ * run replaces every candidate nobody picked or exported, including one being adjusted or exported.
+ */
+export function goneHighlightRefs(list: readonly Pick<Highlight, 'id'>[], refs: HighlightRefs): Record<keyof HighlightRefs, boolean> {
+  const ids = new Set(list.map(h => h.id))
+  const gone = (id: string | null) => id !== null && !ids.has(id)
+  return { editing: gone(refs.editing), exporting: gone(refs.exporting), focused: gone(refs.focused) }
+}

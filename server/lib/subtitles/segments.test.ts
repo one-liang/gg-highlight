@@ -34,7 +34,7 @@ function expectWellFormed(drafts: SegmentDraft[]) {
     expect(d.text.trim()).toBe(d.text)
     expect(d.text.length).toBeGreaterThan(0)
     expect(Number.isFinite(d.start) && Number.isFinite(d.end)).toBe(true)
-    expect(d.end).toBeGreaterThanOrEqual(d.start)
+    expect(d.end).toBeGreaterThan(d.start) // every line gets some time on screen
     const prev = drafts[k - 1]
     if (prev) {
       expect(d.start).toBeGreaterThanOrEqual(prev.start)
@@ -275,16 +275,38 @@ describe('buildTranscriptSegments: edge cases', () => {
     expect(out).toEqual([{ start: 3, end: 4, text: '好啊' }])
   })
 
-  it('copes with a segment end that is not a number', () => {
+  it('copes with a segment end and an audio length that are not numbers', () => {
     const words: RawWord[] = [{ word: '好', start: 3, end: 3, probability: 1 }]
     const out = buildTranscriptSegments(raw([{ start: 3, end: Number.NaN, text: '好', words }]), 'zh')
-    expect(out).toEqual([{ start: 3, end: 3, text: '好' }])
+    expect(out).toEqual([{ start: 3, end: 4, text: '好' }])
   })
 
-  it('keeps zero-length words inside the segment span', () => {
+  it('shows zero-length words for a second, until the next segment or the end of the audio at most', () => {
     const words: RawWord[] = [{ word: ' Yes', start: 2, end: 2, probability: 1 }]
-    const out = buildTranscriptSegments(raw([{ start: 1.5, end: 2.4, text: ' Yes', words }], 'en'), 'en')
-    expect(out).toEqual([{ start: 2, end: 2.4, text: 'Yes' }])
+    const yes: RawSegment = { start: 1.5, end: 2, text: ' Yes', words }
+    expect(buildTranscriptSegments({ ...raw([yes], 'en'), durationSec: 900 }, 'en')).toEqual([{ start: 2, end: 3, text: 'Yes' }])
+    expect(buildTranscriptSegments({ ...raw([yes], 'en'), durationSec: 2.4 }, 'en')).toEqual([{ start: 2, end: 2.4, text: 'Yes' }])
+    const next = seg(enWords(' Okay', 2.6, 0.3))
+    expect(buildTranscriptSegments(raw([yes, next], 'en'), 'en')[0]).toEqual({ start: 2, end: 2.6, text: 'Yes' })
+  })
+
+  it('a loop collapsed onto its segment end (segment end = last word end) still gets a second', () => {
+    const loop = (text: string): RawSegment => ({ start: 143.2, end: 143.2, text, words: Array.from(text).map(word => ({ word, start: 143.2, end: 143.2, probability: 0.3 })) })
+    const out = buildTranscriptSegments({ ...raw([loop('快快快快'), loop('快快快快走吧')]), durationSec: 900 }, 'zh')
+    expectWellFormed(out)
+    expect(out).toEqual([
+      { start: 143.2, end: 144.2, text: '快快快快' },
+      { start: 144.2, end: 145.2, text: '快快快快走吧' },
+    ])
+  })
+
+  it('collapsed pieces of one segment are shown one after the other', () => {
+    const text = '我們先過去那邊然後再回來這裡看看有沒有東西可以拿走吧好不好'
+    const words = Array.from(text).map(word => ({ word, start: 50, end: 50, probability: 0.3 }))
+    const out = buildTranscriptSegments({ ...raw([{ start: 50, end: 50, text, words }]), durationSec: 900 }, 'zh')
+    expect(out.length).toBeGreaterThan(1)
+    expectWellFormed(out)
+    expect(out[0]!.start).toBe(50)
   })
 
   it('ignores words with invalid times and fixes reversed ones', () => {

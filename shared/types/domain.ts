@@ -34,8 +34,18 @@ export type AnalysisMode = 'full' | 'highlights'
  */
 export const ANALYSIS_VERSION = 2
 
+/** `error` of an Analysis or Clip whose job was cancelled (e.g. the video was removed mid-run). */
+export const CANCELLED_MESSAGE = '已取消'
+
 /** The four Signals of GLOSSARY.md. Milestone 2 has loudness and transcript; milestone 3 adds chat and heatmap. */
 export type SignalKind = 'loudness' | 'transcript' | 'chat' | 'heatmap'
+
+/**
+ * SignalState.reason of a transcript Signal that is missing on purpose or for lack of speech: unlike
+ * the other reasons (Ollama not running, no model…), running 只重新找精華片段 again does not help.
+ */
+export const TRANSCRIPT_SIGNAL_DISABLED_REASON = '已關閉 AI 讀逐字稿（GG_OLLAMA_URL=off）'
+export const TRANSCRIPT_SIGNAL_EMPTY_REASON = '逐字稿沒有內容'
 
 export interface SignalState {
   kind: SignalKind

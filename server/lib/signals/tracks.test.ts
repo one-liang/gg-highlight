@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { combineTracks, momentsTrack, movingAverage, trackLength } from './tracks'
+import { combineTracks, coverageMask, momentsTrack, movingAverage, trackLength } from './tracks'
 import type { NamedTrack, TranscriptMoment } from './types'
 
 const moment = (start: number, end: number, score: number): TranscriptMoment => ({ start, end, score, reason: '大笑' })
@@ -77,7 +77,29 @@ describe('movingAverage', () => {
   })
 })
 
+describe('coverageMask', () => {
+  it('is 0 for every second a gap touches, 1 elsewhere', () => {
+    expect(Array.from(coverageMask([], 3.5))).toEqual([1, 1, 1, 1])
+    expect(Array.from(coverageMask([{ start: 1.5, end: 3 }], 5))).toEqual([1, 0, 0, 1, 1])
+    expect(Array.from(coverageMask([{ start: 0, end: 1 }, { start: 3.2, end: 99 }], 5))).toEqual([0, 1, 1, 0, 0])
+  })
+
+  it('skips empty, reversed and non-finite gaps', () => {
+    expect(Array.from(coverageMask([{ start: 2, end: 2 }, { start: 3, end: 1 }, { start: Number.NaN, end: 2 }], 3))).toEqual([1, 1, 1])
+  })
+})
+
 describe('combineTracks', () => {
+  it('leaves a track out of the weighting where it does not cover a second (no penalty there)', () => {
+    const loud = [0.6, 0.6, 0.6, 0.6]
+    const covered = Uint8Array.from([1, 0, 0, 1])
+    const values = combineTracks([track('loudness', loud), { ...track('transcript', [0, 0, 0, 1]), covered }], 4, 1)
+    // covered: (1 × 0.6 + 2 × t) / 3; not covered: the loudness alone
+    expect(rounded(values)).toEqual([0.2, 0.6, 0.6, 0.867])
+    // nothing covers a second: 0
+    expect(rounded(combineTracks([{ ...track('transcript', [1, 1]), covered: Uint8Array.from([0, 1]) }], 2, 1))).toEqual([0, 1])
+  })
+
   it('is all zeros without tracks', () => {
     expect(Array.from(combineTracks([], 3.2))).toEqual([0, 0, 0, 0])
   })

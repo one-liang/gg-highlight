@@ -5,6 +5,8 @@ import {
   analysisFailedTitle,
   canReanalyze,
   countCandidates,
+  failedRunFootnote,
+  isFailedRerun,
   isTranscriptReady,
   needsHighlightsUpgrade,
 } from '~/utils/analysis'
@@ -48,7 +50,7 @@ watch(() => video.value?.analysis.status, async (now, before) => {
     notify.success(notice.title, notice.description)
   }
   else if (now === 'failed') {
-    notify.message(analysisFailedTitle(mode), current.analysis.error ?? undefined)
+    notify.message(analysisFailedTitle(current.analysis), current.analysis.error ?? undefined)
   }
 })
 useHead({ title: () => video.value?.title ?? '影片' })
@@ -201,11 +203,11 @@ function onDeleted() {
         class="mb-5"
         :actions="[
           { label: '找精華片段', icon: 'i-lucide-sparkles', color: 'primary', loading: reanalyzing === 'highlights', disabled: !!reanalyzing, onClick: findHighlights },
-          { label: '重新分析全部', icon: 'i-lucide-refresh-cw', color: 'neutral', variant: 'outline', disabled: !!reanalyzing, onClick: () => openReanalyze('full') },
+          { label: '重新分析全部', icon: 'i-lucide-refresh-cw', color: 'neutral', variant: 'outline', disabled: !!reanalyzing || video.fileMissing, onClick: () => openReanalyze('full') },
         ]"
       />
 
-      <!-- a highlights-only run keeps the Transcript: show its progress / failure above the workspace -->
+      <!-- a highlights-only run, or a failed full re-run, keeps the Transcript: show it above the workspace -->
       <template v-if="transcriptReady">
         <AnalysisProgressCard v-if="isAnalysisActive(video)" :video="video" class="mb-5" />
         <UAlert
@@ -213,14 +215,18 @@ function onDeleted() {
           color="error"
           variant="subtle"
           icon="i-lucide-circle-x"
-          :title="analysisFailedTitle(video.analysis.mode)"
+          :title="analysisFailedTitle(video.analysis)"
           class="mb-5"
-          :actions="[{ label: '重試', icon: 'i-lucide-rotate-ccw', color: 'error', loading: retrying, onClick: retry }]"
+          data-testid="analysis-failed"
+          :actions="[
+            { label: '重試', icon: 'i-lucide-rotate-ccw', color: 'error', loading: retrying, onClick: retry },
+            ...(isFailedRerun(video) ? [{ label: '重新分析…', icon: 'i-lucide-refresh-cw', color: 'neutral' as const, variant: 'outline' as const, disabled: !!reanalyzing, onClick: () => openReanalyze() }] : []),
+          ]"
         >
           <template #description>
             <p>{{ video.analysis.error || '發生未知錯誤。' }}</p>
-            <p class="mt-1">
-              逐字稿、精華片段與剪輯不受影響，可以照常使用。
+            <p v-for="line in failedRunFootnote(video)" :key="line" class="mt-1">
+              {{ line }}
             </p>
           </template>
         </UAlert>
@@ -234,7 +240,7 @@ function onDeleted() {
         color="error"
         variant="subtle"
         icon="i-lucide-circle-x"
-        :title="analysisFailedTitle(video.analysis.mode)"
+        :title="analysisFailedTitle(video.analysis)"
         :description="video.analysis.error || '發生未知錯誤。'"
         class="max-w-4xl"
         :actions="[{ label: '重試', icon: 'i-lucide-rotate-ccw', color: 'error', loading: retrying, onClick: retry }]"

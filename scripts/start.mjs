@@ -42,6 +42,8 @@ export const DEFAULT_PORT = 3939
  * Nitro's own default (30 s) is longer than FORCE_KILL_MS.
  */
 export const SHUTDOWN_TIMEOUT_MS = 3000
+/** Signals that make Nitro shut down gracefully (its default is only "SIGTERM SIGINT"). */
+export const SHUTDOWN_SIGNALS = 'SIGTERM SIGINT SIGHUP'
 const READY_TIMEOUT_MS = 60_000
 const FORCE_KILL_MS = 15_000
 
@@ -208,7 +210,12 @@ export function urlHost(host) {
   return host.includes(':') ? `[${host}]` : host
 }
 
-/** Environment for the Nitro server: HOST/PORT defaults, a short shutdown timeout and a quiet node:sqlite. */
+/**
+ * Environment for the Nitro server: HOST/PORT defaults, a short shutdown timeout, SIGHUP as a
+ * shutdown signal and a quiet node:sqlite. Closing the console window sends SIGHUP on Windows;
+ * without a listener Node dies at once, before the close hook stops ffmpeg / the transcriber and
+ * unloads the Ollama model.
+ */
 export function serverEnv(env = process.env) {
   const { host, port } = listenAddress(env)
   const flag = '--disable-warning=ExperimentalWarning'
@@ -219,6 +226,7 @@ export function serverEnv(env = process.env) {
     HOST: host,
     PORT: String(port),
     NITRO_SHUTDOWN_TIMEOUT: env.NITRO_SHUTDOWN_TIMEOUT || String(SHUTDOWN_TIMEOUT_MS),
+    NITRO_SHUTDOWN_SIGNALS: env.NITRO_SHUTDOWN_SIGNALS || SHUTDOWN_SIGNALS,
     NODE_OPTIONS: nodeOptions,
   }
 }
@@ -429,7 +437,8 @@ export async function main({
     }, FORCE_KILL_MS)
     forceTimer.unref()
   }
-  const signals = platform === 'win32' ? ['SIGINT', 'SIGTERM', 'SIGBREAK'] : ['SIGINT', 'SIGTERM', 'SIGHUP']
+  // SIGHUP on Windows = the console window is being closed: wait for the server's graceful shutdown.
+  const signals = platform === 'win32' ? ['SIGINT', 'SIGTERM', 'SIGBREAK', 'SIGHUP'] : ['SIGINT', 'SIGTERM', 'SIGHUP']
   for (const s of signals) process.on(s, onSignal)
 
   try {

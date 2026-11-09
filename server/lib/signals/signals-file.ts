@@ -1,4 +1,4 @@
-// data/videos/<id>/signals.json: raw Signal results of the last run, so「只找精華」can reuse the loudness.
+// data/videos/<id>/signals.json: raw Signal results of the last run, so「只重新找精華片段」can reuse the loudness.
 import fs from 'node:fs/promises'
 import { z } from 'zod'
 import { writeAtomically } from '../media/files'

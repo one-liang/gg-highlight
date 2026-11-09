@@ -2,7 +2,7 @@
 import type { Clip, ClipStatus, Highlight, SourceVideo, TranscriptSegment } from '~~/shared/types/domain'
 import type { HighlightEditDraft } from '~/types/highlight-edit'
 import { videoMediaUrl } from '~/utils/api-urls'
-import { sortHighlights, upsertHighlight, validRange } from '~/utils/highlights'
+import { goneHighlightRefs, sortHighlights, upsertHighlight, validRange } from '~/utils/highlights'
 import { isAnalysisActive, isClipActive, layoutLabels } from '~/utils/labels'
 import { formatTime } from '~/utils/time'
 import { replaceSegment } from '~/utils/transcript'
@@ -91,6 +91,24 @@ function openExport(h: Highlight) {
   exportTarget.value = h
   exportOpen.value = true
 }
+
+// A highlights-only run replaces the candidates nobody picked, which may be the one being adjusted or
+// exported: let go of it, or every 調整 stays locked and the export would answer 404.
+watch(highlights, (list) => {
+  if (!highlightsRes.loaded.value) return
+  const gone = goneHighlightRefs(list, {
+    editing: editing.value?.id ?? null,
+    exporting: exportOpen.value ? exportTarget.value?.id ?? null : null,
+    focused: focusedId.value,
+  })
+  if (gone.editing) editing.value = null
+  if (gone.exporting) {
+    exportOpen.value = false
+    exportTarget.value = null
+  }
+  if (gone.focused) focusedId.value = null
+  if (gone.editing || gone.exporting) notify.message('這個候選已被新的分析結果取代')
+})
 
 function onClipCreated(clip: Clip) {
   clipsRes.set([clip, ...clips.value.filter(c => c.id !== clip.id)])
