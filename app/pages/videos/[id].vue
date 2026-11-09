@@ -8,6 +8,7 @@ import {
   failedRunFootnote,
   isFailedRerun,
   isTranscriptReady,
+  missingFileNextStep,
   needsHighlightsUpgrade,
 } from '~/utils/analysis'
 import { formatFps, formatResolution } from '~/utils/format'
@@ -176,6 +177,7 @@ function onDeleted() {
         icon="i-lucide-file-warning"
         title="找不到原始影片檔"
         class="mb-5"
+        data-testid="file-missing"
       >
         <template #description>
           <p v-if="transcriptReady">
@@ -188,7 +190,7 @@ function onDeleted() {
             原本的位置：<code class="break-all font-mono text-xs">{{ video.filePath }}</code>
           </p>
           <p class="mt-1">
-            {{ video.analysis.status === 'failed' ? '把檔案放回原位置後，按下方的「重試」重新分析。' : '把檔案放回原位置後重新整理這一頁即可恢復。' }}
+            {{ missingFileNextStep(video) }}
           </p>
         </template>
       </UAlert>

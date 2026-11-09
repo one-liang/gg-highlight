@@ -79,6 +79,21 @@ function markAsFailedFullRerun(videoId: string, error: string): void {
   }
 }
 
+/** Points the stored source file somewhere else (the recording "moved away"); returns the old path. */
+function setFilePath(videoId: string, filePath: string): string {
+  const db = new DatabaseSync(path.join(process.env.GG_E2E_DATA_DIR!, 'gg-highlight.db'))
+  try {
+    db.exec('PRAGMA busy_timeout = 5000')
+    const row = db.prepare('SELECT file_path FROM videos WHERE id = ?').get(videoId) as { file_path: string } | undefined
+    expect(row?.file_path).toBeTruthy()
+    expect(db.prepare('UPDATE videos SET file_path = ? WHERE id = ?').run(filePath, videoId).changes).toBe(1)
+    return row!.file_path
+  }
+  finally {
+    db.close()
+  }
+}
+
 /** Makes the stored Analysis look like a milestone-1 one (what the schema-2 migration leaves for those videos). */
 function markAsMilestone1(videoId: string): void {
   const db = new DatabaseSync(path.join(process.env.GG_E2E_DATA_DIR!, 'gg-highlight.db'))
@@ -267,6 +282,21 @@ test('candidate highlights: pick and export, re-analyse keeping edits, missing m
   await expect(picked).toContainText('已輸出 1 次')
   await expect(clip.getByRole('link', { name: '下載影片' })).toBeVisible()
   await shot(page, testInfo, 'm2-failed-full-rerun')
+  // the recording moved away as well: no promise of preview or export, and no 重試 (it would transcribe again)
+  const originalPath = setFilePath(videoId, path.join(FIXTURES_DIR, 'e2e-moved-away.mkv'))
+  await page.reload()
+  const fileMissing = page.getByTestId('file-missing')
+  await expect(fileMissing).toContainText('找不到原始影片檔')
+  await expect(fileMissing).toContainText('把檔案放回原位置後重新整理這一頁，就能再預覽與輸出剪輯。')
+  await expect(fileMissing).not.toContainText('重試')
+  await expect(failedAlert).toContainText('逐字稿與精華片段照常可以看、改；原始影片檔放回原位置之前無法預覽或輸出剪輯。')
+  await expect(failedAlert).not.toContainText('剪輯照常可以看、改、輸出')
+  await expect(transcript.getByText(EDITED_TEXT, { exact: true })).toBeVisible()
+  await shot(page, testInfo, 'm2-failed-full-rerun-file-missing')
+  setFilePath(videoId, originalPath)
+  await page.reload()
+  await expect(fileMissing).toHaveCount(0)
+  await expect(failedAlert).toContainText('逐字稿、精華片段與剪輯照常可以看、改、輸出。')
   // both re-analysis choices are offered; with an edited segment 只重新找精華片段 is preselected
   await failedAlert.getByRole('button', { name: '重新分析…' }).click()
   const failedModal = page.getByRole('dialog', { name: '重新分析' })

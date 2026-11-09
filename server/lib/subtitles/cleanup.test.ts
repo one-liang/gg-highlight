@@ -88,6 +88,16 @@ const stockPhraseCases: Case[] = [
   ['an Amara credit glued after speech removes only itself', [seg(zw(['好', '那', '今天', '先', '到', '這邊', ' 字幕', '由', 'Am', 'ara', '.', 'org', '社', '區', '提供'], 100, 0.25))], ['好那今天先到這邊']],
   ['an Amara credit glued before speech removes only itself', [seg(zw(['字幕', '由', 'Am', 'ara', '.', 'org', '社', '區', '提供', ' 大家', '好', '歡迎', '回來', '今天', '要', '玩', '皮', '克', '公園'], 100, 0.25))], ['大家好歡迎回來今天要玩皮克公園']],
   ['a core stops at a Whisper space between Chinese characters', [seg(zw(['好', '那', '今天', '先', '到', '這邊', ' 請', '不', '吝', '點', '贊', '訂閱'], 100, 0.25))], ['好那今天先到這邊']],
+  // 字幕志願者 is followed by a name, which Whisper writes after a space: the name goes with the credit
+  ['a 字幕志願者 credit takes the name after its space', [seg(zw(['字幕', '志', '願', '者', ' 李', '宗', '盛'], 100, 0.25))], []],
+  ['a Simplified 字幕志愿者 credit takes the name after its space', [seg(zw(['字幕', '志', '愿', '者', ' 杨', '茜', '茜'], 100, 0.25))], []],
+  ['a 中文字幕志願者 credit takes the name after its space', [seg(zw(['中文', '字幕', '志', '願', '者', ' 楊', '茜', '茜'], 100, 0.25))], []],
+  ['a named credit before speech keeps the speech', [seg(zw(['字幕', '志', '願', '者', ' 大家', '好', '歡迎', '回來', '今天', '要', '玩'], 100, 0.25))], ['大家好歡迎回來今天要玩']],
+  ['a named credit and its name before speech keep the speech', [seg(zw(['字幕', '志', '願', '者', ' 楊', '茜', '茜', ' 大家', '好', '歡迎', '回來'], 100, 0.25))], ['大家好歡迎回來']],
+  ['a named credit and its name after speech remove only themselves', [seg(zw(['好', '那', '今天', '先', '到', '這邊', ' 字幕', '志', '願', '者', ' 楊', '茜', '茜'], 100, 0.25))], ['好那今天先到這邊']],
+  ['a named credit followed by a pause keeps what comes after it', [seg([...zw(['字幕', '志', '願', '者'], 100, 0.25), ...zw([' 好', '啊'], 102, 0.25)])], ['好啊']],
+  ['the 讚 spelling of the 明鏡與點點 credit', [seg(zw(['我們', '下次', '見', ' 請', '不', '吝', '點', '讚', ' 訂閱', ' 轉', '發', ' 打', '賞', '支持', '明', '鏡', '與', '點', '點', '欄', '目'], 100, 0.25))], ['我們下次見']],
+  ['a 請不吝點讚 core with the 讚 spelling', [seg(zw(['好', '那', '今天', '先', '到', '這邊', ' 請', '不', '吝', '點', '讚', '訂閱'], 100, 0.25))], ['好那今天先到這邊']],
   ['a core takes at most 6 characters on each side of it', [seg(zw('大家好歡迎回來今天要玩皮克公園明鏡與點點我們先過去那邊看看', 100, 0.25))], ['大家好歡迎回來今天邊看看']],
   ['en: a latin core matches whole words only (Tamara organized)', [seg(ew(' My friend Tamara organized the whole raid for us.', 1))], ['My friend Tamara organized the whole raid for us.'], 'en'],
   ['en: Tamara organized it. is kept', [seg(ew(' Tamara organized it. Thank you.', 1))], ['Tamara organized it. Thank you.'], 'en'],
@@ -256,6 +266,24 @@ describe('cleanRawTranscript', () => {
       ])
       expect(duplicateStarts(after)).toEqual([])
       expect(cuesForRange(after, 135, 150).map(c => c.text)).toEqual(['快快快快', '快快快快走吧'])
+    })
+
+    it('speech that starts where the loop collapsed keeps its time, in the Transcript and in a Clip', () => {
+      const speech = [seg(zw('好那我們走', 143.2, 0.16)), seg(zw('然後去那邊', 144, 0.16)), seg(zw('拿那個箱子', 144.8, 0.16))]
+      const after = buildTranscriptSegments(clean([seg(zw('我們先過去那邊', 140, 0.3)), seg(collapsed('快'.repeat(26), 143.2)), ...speech]).raw, 'zh')
+      expect(after).toEqual([
+        { start: 140, end: 142.1, text: '我們先過去那邊' },
+        { start: 142.2, end: 143.2, text: '快快快快' },
+        { start: 143.2, end: 144, text: '好那我們走' },
+        { start: 144, end: 144.8, text: '然後去那邊' },
+        { start: 144.8, end: 145.6, text: '拿那個箱子' },
+      ])
+      expect(cuesForRange(after, 143, 146).map(c => [c.start, c.end, c.text])).toEqual([
+        [0, 0.2, '快快快快'],
+        [0.2, 1, '好那我們走'],
+        [1, 1.8, '然後去那邊'],
+        [1.8, 2.6, '拿那個箱子'],
+      ])
     })
 
     it('no Transcript line ends up with no time on screen', () => {

@@ -309,6 +309,72 @@ describe('buildTranscriptSegments: edge cases', () => {
     expect(out[0]!.start).toBe(50)
   })
 
+  describe('a collapsed line never moves the real speech around it', () => {
+    /** A raw segment whose words all collapsed onto `at` (faster-whisper: segment start = end = that instant). */
+    const collapsedSeg = (text: string, at: number): RawSegment =>
+      ({ start: at, end: at, text, words: Array.from(text).map(word => ({ word, start: at, end: at, probability: 0.3 })) })
+    const before = seg(charWords('我們先過去那邊', 140, 0.3)) // 140–142.1
+    const lines = (out: SegmentDraft[]) => out.map(d => `${d.start}–${d.end} ${d.text}`)
+
+    it('speech starting at the same instant keeps its time: the loop takes the free time before it', () => {
+      // faster-whisper seeks to the last word's end, so the next segment often starts exactly where the loop collapsed
+      const speech = [seg(charWords('好那我們走', 143.2, 0.16)), seg(charWords('然後去那邊', 144, 0.16)), seg(charWords('拿那個箱子', 144.8, 0.16))]
+      const expected = ['140–142.1 我們先過去那邊', '142.2–143.2 快快快快', '143.2–144 好那我們走', '144–144.8 然後去那邊', '144.8–145.6 拿那個箱子']
+      const out = buildTranscriptSegments(raw([before, collapsedSeg('快快快快', 143.2), ...speech]), 'zh')
+      expectWellFormed(out)
+      expect(lines(out)).toEqual(expected)
+      // the same when the speech comes first in the raw output
+      expect(lines(buildTranscriptSegments(raw([before, speech[0]!, collapsedSeg('快快快快', 143.2), speech[1]!, speech[2]!]), 'zh'))).toEqual(expected)
+    })
+
+    it('a speech line longer than a second at the same instant is not delayed either', () => {
+      const out = buildTranscriptSegments(raw([before, collapsedSeg('快快快快', 143.2), seg(charWords('好那我們走吧', 143.2, 0.3)), seg(charWords('然後去那邊看看', 145.1, 0.3))]), 'zh')
+      expectWellFormed(out)
+      expect(lines(out)).toEqual(['140–142.1 我們先過去那邊', '142.2–143.2 快快快快', '143.2–145 好那我們走吧', '145.1–147.2 然後去那邊看看'])
+    })
+
+    it('speech a moment later gives the same result as speech at the same instant', () => {
+      // 0.02 s after T is too short to be seen: the loop takes the free time before T, as when the speech starts at T
+      const out = buildTranscriptSegments(raw([before, collapsedSeg('快快快快', 143.2), seg(charWords('好那我們走', 143.22, 0.16))]), 'zh')
+      expectWellFormed(out)
+      expect(lines(out)).toEqual(['140–142.1 我們先過去那邊', '142.2–143.2 快快快快', '143.22–144.02 好那我們走'])
+    })
+
+    it('collapsed pieces of one segment share the time before the next segment, in order', () => {
+      const text = '我們先過去那邊然後再回來這裡看看有沒有東西可以拿走吧好不好'
+      const out = buildTranscriptSegments(raw([collapsedSeg(text, 50), seg(charWords('對啊', 50.5, 0.3))]), 'zh')
+      expectWellFormed(out)
+      expect(out).toHaveLength(3)
+      expect(out.map(d => d.text).slice(0, 2).join('')).toBe(text)
+      expect(out.map(d => [d.start, d.end])).toEqual([[50, 50.25], [50.25, 50.5], [50.5, 51.1]])
+      expect(out[2]!.text).toBe('對啊')
+    })
+
+    it('collapsed pieces near the end of the audio stay inside it, in order', () => {
+      const text = '我們先過去那邊然後再回來這裡看看有沒有東西可以拿走吧好不好'
+      const out = buildTranscriptSegments({ ...raw([collapsedSeg(text, 899.6)]), durationSec: 900 }, 'zh')
+      expectWellFormed(out)
+      expect(out.map(d => d.text).join('')).toBe(text)
+      expect(out.map(d => [d.start, d.end])).toEqual([[899.6, 899.8], [899.8, 900]])
+      // collapsed onto the very end of the audio: the time before it
+      const atEnd = buildTranscriptSegments({ ...raw([before, collapsedSeg('快快快快', 900)]), durationSec: 900 }, 'zh')
+      expect(lines(atEnd)).toEqual(['140–142.1 我們先過去那邊', '899–900 快快快快'])
+    })
+
+    it('two loops at the same instant share the time before the next speech, in order', () => {
+      const out = buildTranscriptSegments(raw([collapsedSeg('快快快快', 143.2), collapsedSeg('快快快快走吧', 143.2), seg(charWords('好那我們走', 143.6, 0.16))]), 'zh')
+      expectWellFormed(out)
+      expect(lines(out)).toEqual(['143.2–143.4 快快快快', '143.4–143.6 快快快快走吧', '143.6–144.4 好那我們走'])
+    })
+
+    it('with no free time on either side the loop still gets a second, after the speech that starts with it', () => {
+      const tight = seg(charWords('我們先過去那邊', 140, 0.46)) // ends at 143.22
+      const out = buildTranscriptSegments(raw([tight, collapsedSeg('快快快快', 143.22), seg(charWords('好那我們走', 143.22, 0.16))]), 'zh')
+      expectWellFormed(out)
+      expect(lines(out)).toEqual(['140–143.22 我們先過去那邊', '143.22–144.02 好那我們走', '144.02–145.02 快快快快'])
+    })
+  })
+
   it('ignores words with invalid times and fixes reversed ones', () => {
     const words: RawWord[] = [
       { word: '你', start: Number.NaN, end: 1, probability: 1 },

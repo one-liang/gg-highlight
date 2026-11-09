@@ -68,16 +68,20 @@ const MAX_CLAUSE_SPREAD = 6
 // Phrases are compared after normalize(): NFKC, lower case, letters and digits only.
 /** Stock phrases Whisper writes over silence or music: removed wherever they appear. */
 const STOCK_PHRASES = [
-  '請不吝點贊訂閱轉發打賞支持明鏡與點點欄目', '请不吝点赞订阅转发打赏支持明镜与点点栏目',
+  '請不吝點贊訂閱轉發打賞支持明鏡與點點欄目', '請不吝點讚訂閱轉發打賞支持明鏡與點點欄目', '请不吝点赞订阅转发打赏支持明镜与点点栏目',
   '字幕由amaraorg社區提供', '字幕由amaraorg社区提供', '小編字幕由amaraorg社區提供', '小编字幕由amaraorg社区提供',
   '優優獨播劇場yoyotelevisionseriesexclusive', '优优独播剧场yoyotelevisionseriesexclusive',
   'subtitlesbytheamaraorgcommunity', 'transcribedbyhttpsotterai',
 ]
 /** Cores of stock phrases nobody says in a stream: removed together with the clause around them (up to MAX_CLAUSE_SPREAD). */
 const STOCK_PHRASE_CORES = [
-  '明鏡與點點', '明镜与点点', '請不吝點贊', '请不吝点赞', '點贊訂閱轉發打賞', '点赞订阅转发打赏',
+  '明鏡與點點', '明镜与点点', '請不吝點贊', '請不吝點讚', '请不吝点赞', '點贊訂閱轉發打賞', '點讚訂閱轉發打賞', '点赞订阅转发打赏',
   '字幕志願者', '字幕志愿者', '優優獨播劇場', '优优独播剧场', 'yoyotelevisionseries', 'amaraorg',
 ]
+/** Cores of a credit followed by a name (「字幕志願者 楊茜茜」): the name is part of the hallucination. */
+const NAMED_CREDIT_CORES = new Set(['字幕志願者', '字幕志愿者'])
+/** Longest name taken after a named credit's Whisper space, in units (a longer run is real speech). */
+const MAX_CREDIT_NAME = 4
 /** Phrases someone might really say: removed only when they are a whole low-confidence segment. */
 const LOW_CONFIDENCE_PHRASES = new Set([
   '謝謝觀看', '谢谢观看', '感謝觀看', '感谢观看', '謝謝收看', '谢谢收看', '謝謝大家觀看', '谢谢大家观看',
@@ -301,8 +305,9 @@ function toUnits(chars: Char[]): Unit[] {
  * Units of the stock phrases in the text. An exact STOCK_PHRASES match removes only itself. A core
  * found outside an exact match also removes the rest of its clause, at most MAX_CLAUSE_SPREAD on
  * each side, so a credit glued to real speech (Whisper writes no punctuation and contiguous word
- * times) does not take the speech with it. Matches must start and end on unit boundaries, so the
- * latin core "amaraorg" matches "Amara.org" but not "Tamara organized".
+ * times) does not take the speech with it. A named credit's clause also takes the name Whisper
+ * writes after a space (at most MAX_CREDIT_NAME units, ending its own clause). Matches must start
+ * and end on unit boundaries, so the latin core "amaraorg" matches "Amara.org" but not "Tamara organized".
  */
 function stockPhraseUnits({ units, chars }: TextStream, timeOf: TimeOf): Set<number> {
   const keys = units.map(u => lettersOnly(u.key))
@@ -335,6 +340,12 @@ function stockPhraseUnits({ units, chars }: TextStream, timeOf: TimeOf): Set<num
       let b = unitAt[to]!
       for (let budget = MAX_CLAUSE_SPREAD; a > 0 && !endsClause(a - 1) && spreadCost(a - 1) <= budget; a--) budget -= spreadCost(a - 1)
       for (let budget = MAX_CLAUSE_SPREAD; !endsClause(b) && spreadCost(b + 1) <= budget; b++) budget -= spreadCost(b + 1)
+      if (NAMED_CREDIT_CORES.has(core) && b === unitAt[to]! && b < units.length - 1 && tightSpaceAfter(b) && !pauseAfter(b)) {
+        // Whisper writes the name after a space: a short run that then ends its clause is the name.
+        let c = b + 1
+        while (c - b < MAX_CREDIT_NAME && !endsClause(c)) c++
+        if (endsClause(c)) b = c
+      }
       add(a, b)
     }
   }

@@ -152,14 +152,30 @@ export function analysisFailedTitle(analysis: Pick<AnalysisState, 'mode' | 'vers
 
 /**
  * Lines under the error of a failed run whose workspace stays usable (isTranscriptReady): a failed
- * highlights-only run, or a failed / cancelled 'full' re-run (whose 重試 transcribes again).
+ * highlights-only run, or a failed / cancelled 'full' re-run (whose 重試 transcribes again). Without
+ * the source file nothing can be previewed or exported, so they do not promise that.
  */
-export function failedRunFootnote(video: WithAnalysis): string[] {
-  if (!isFailedRerun(video)) return ['逐字稿、精華片段與剪輯不受影響，可以照常使用。']
+export function failedRunFootnote(video: Pick<SourceVideo, 'analysis' | 'fileMissing'>): string[] {
+  if (!isFailedRerun(video)) {
+    return [video.fileMissing ? '逐字稿與精華片段不受影響，可以照常查看與修改。' : '逐字稿、精華片段與剪輯不受影響，可以照常使用。']
+  }
   return [
-    '逐字稿、精華片段與剪輯照常可以看、改、輸出。',
+    video.fileMissing
+      ? '逐字稿與精華片段照常可以看、改；原始影片檔放回原位置之前無法預覽或輸出剪輯。'
+      : '逐字稿、精華片段與剪輯照常可以看、改、輸出。',
     '「重試」會再重新辨識語音一次，之後改過的逐字稿會被覆蓋；只想更新候選精華片段，請按「重新分析」→「只重新找精華片段」。',
   ]
+}
+
+/**
+ * Last line of the 「找不到原始影片檔」 alert: what to do once the file is back. Only a failed first
+ * Analysis needs 「重試」; with the workspace shown (a failed re-run too) reloading the page is
+ * enough, and 重試 would transcribe again over the user's edits.
+ */
+export function missingFileNextStep(video: WithAnalysis): string {
+  if (isTranscriptReady(video)) return '把檔案放回原位置後重新整理這一頁，就能再預覽與輸出剪輯。'
+  if (video.analysis.status === 'failed') return '把檔案放回原位置後，按下方的「重試」重新分析。'
+  return '把檔案放回原位置後重新整理這一頁即可恢復。'
 }
 
 /** Toast after 「重新分析」/「找精華片段」 queued a run. */

@@ -11,6 +11,7 @@ import {
   failedRunFootnote,
   isFailedRerun,
   isTranscriptReady,
+  missingFileNextStep,
   needsHighlightsUpgrade,
   REFILL_TRANSCRIPT_HINT,
   reanalyzeStartedNotice,
@@ -209,11 +210,34 @@ describe('completion notice', () => {
   })
 
   it('says the work is intact, and what 重試 does after a failed full re-run', () => {
-    expect(failedRunFootnote(v({ status: 'failed', mode: 'highlights' }))).toEqual(['逐字稿、精華片段與剪輯不受影響，可以照常使用。'])
-    const lines = failedRunFootnote(v({ status: 'failed', mode: 'full', version: ANALYSIS_VERSION }))
+    expect(failedRunFootnote({ ...v({ status: 'failed', mode: 'highlights' }), fileMissing: false })).toEqual(['逐字稿、精華片段與剪輯不受影響，可以照常使用。'])
+    const lines = failedRunFootnote({ ...v({ status: 'failed', mode: 'full', version: ANALYSIS_VERSION }), fileMissing: false })
     expect(lines[0]).toBe('逐字稿、精華片段與剪輯照常可以看、改、輸出。')
     expect(lines[1]).toContain('「重試」會再重新辨識語音一次，之後改過的逐字稿會被覆蓋')
     expect(lines[1]).toContain('「只重新找精華片段」')
+  })
+
+  it('does not promise preview or export when the source file is missing', () => {
+    expect(failedRunFootnote({ ...v({ status: 'failed', mode: 'highlights' }), fileMissing: true })).toEqual(['逐字稿與精華片段不受影響，可以照常查看與修改。'])
+    const lines = failedRunFootnote({ ...v({ status: 'failed', mode: 'full', version: ANALYSIS_VERSION, error: CANCELLED_MESSAGE }), fileMissing: true })
+    expect(lines[0]).toBe('逐字稿與精華片段照常可以看、改；原始影片檔放回原位置之前無法預覽或輸出剪輯。')
+    expect(lines[1]).toContain('「重試」會再重新辨識語音一次，之後改過的逐字稿會被覆蓋')
+    for (const line of [...lines, ...failedRunFootnote({ ...v({ status: 'failed', mode: 'highlights' }), fileMissing: true })]) {
+      expect(line).not.toContain('輸出。')
+      expect(line).not.toContain('照常使用')
+    }
+  })
+
+  it('tells what to do once the missing source file is back', () => {
+    const reload = '把檔案放回原位置後重新整理這一頁，就能再預覽與輸出剪輯。'
+    // the workspace is shown: reloading is enough (重試 would transcribe again over the edits)
+    expect(missingFileNextStep(v({ status: 'failed', mode: 'full', version: ANALYSIS_VERSION }))).toBe(reload)
+    expect(missingFileNextStep(v({ status: 'failed', mode: 'highlights' }))).toBe(reload)
+    expect(missingFileNextStep(v({ status: 'done' }))).toBe(reload)
+    expect(missingFileNextStep(v({ status: 'running', mode: 'highlights' }))).toBe(reload)
+    // a failed first Analysis has no workspace: 重試
+    expect(missingFileNextStep(v({ status: 'failed', mode: 'full', version: null }))).toBe('把檔案放回原位置後，按下方的「重試」重新分析。')
+    expect(missingFileNextStep(v({ status: 'queued', mode: 'full', version: null }))).toBe('把檔案放回原位置後重新整理這一頁即可恢復。')
   })
 })
 

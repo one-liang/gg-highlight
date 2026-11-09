@@ -34,8 +34,9 @@ const COST_WORD = 10
 const COST_PIECE = 4
 // Safety bound for degenerate input (thousands of punctuation-only words with no duration).
 const MAX_WORDS_PER_PIECE = 200
-/** A line shorter than this has collapsed word timestamps; it is shown for COLLAPSED_LINE_SECONDS. */
+/** A line shorter than this has collapsed word timestamps (see placeCollapsed). */
 const MIN_LINE_SECONDS = 0.2
+/** Most time on screen a collapsed line gets. */
 const COLLAPSED_LINE_SECONDS = 1
 
 const round3 = (x: number) => Math.round(x * 1000) / 1000
@@ -49,13 +50,11 @@ const round3 = (x: number) => Math.round(x * 1000) / 1000
 export function buildTranscriptSegments(raw: RawTranscript, language: Language): SegmentDraft[] {
   const clean = language === 'zh' ? cleanZhText : cleanEnText
   const drafts: SegmentDraft[] = []
-  const segments = (raw?.segments ?? []).filter((seg): seg is RawSegment => !!seg)
-  segments.forEach((seg, k) => {
-    // Where this segment's speech must stop at the latest: the next segment, or the end of the audio.
-    const nextStart = k + 1 < segments.length ? segments[k + 1]!.start : raw?.durationSec
-    drafts.push(...splitTokens(segmentTokens(seg, language), clean, typeof nextStart === 'number' && Number.isFinite(nextStart) ? nextStart : null))
-  })
-  return resolveOverlaps(drafts)
+  for (const seg of raw?.segments ?? []) {
+    if (seg) drafts.push(...splitTokens(segmentTokens(seg, language), clean))
+  }
+  const duration = typeof raw?.durationSec === 'number' && Number.isFinite(raw.durationSec) ? raw.durationSec : null
+  return resolveOverlaps(placeCollapsed(drafts, duration))
 }
 
 function segmentTokens(seg: RawSegment, language: Language): Token[] {
@@ -212,11 +211,8 @@ function pieceCost(units: number, seconds: number): number {
   return COST_PIECE + 4 * fill * fill + 2 * span * span + short
 }
 
-/**
- * Dynamic programming over word boundaries: every piece within the limits, minimum total cost.
- * `nextStart` is where the next raw segment starts (or the audio ends); null when unknown.
- */
-function splitTokens(tokens: Token[], clean: (text: string) => string, nextStart: number | null): SegmentDraft[] {
+/** Dynamic programming over word boundaries: every piece within the limits, minimum total cost. */
+function splitTokens(tokens: Token[], clean: (text: string) => string): SegmentDraft[] {
   const n = tokens.length
   if (!n) return []
   const best = new Array<number>(n + 1).fill(Number.POSITIVE_INFINITY)
@@ -251,26 +247,68 @@ function splitTokens(tokens: Token[], clean: (text: string) => string, nextStart
   for (let k = n; k > 0; k = from[k]!) pieces.unshift([from[k]!, k - 1])
 
   const drafts: SegmentDraft[] = []
-  pieces.forEach(([i, j], idx) => {
+  for (const [i, j] of pieces) {
     const group = tokens.slice(i, j + 1)
     const text = clean(group.map(t => t.text).join(''))
-    if (!hasContent(text)) return
+    if (!hasContent(text)) continue
     const spoken = group.filter(t => hasContent(t.text))
     const timed = spoken.length ? spoken : group
     const start = Math.min(...timed.map(t => t.start))
-    let end = Math.max(...timed.map(t => t.end))
-    if (end - start < MIN_LINE_SECONDS) {
-      // Collapsed word timestamps (a loop often collapses onto the segment's end, so the segment end
-      // says nothing): keep the line up for a second, at most until the next piece or segment. When
-      // that one starts at the same instant, resolveOverlaps shows the lines one after the other.
-      const nextPiece = pieces[idx + 1]
-      const next = nextPiece ? tokens[nextPiece[0]]!.start : nextStart
-      const limit = next !== null && next > start ? next : start + COLLAPSED_LINE_SECONDS
-      end = Math.max(end, Math.min(start + COLLAPSED_LINE_SECONDS, limit))
-    }
+    const end = Math.max(...timed.map(t => t.end))
     drafts.push({ start: round3(start), end: round3(end), text })
-  })
+  }
   return drafts
+}
+
+/**
+ * Gives lines whose word timestamps collapsed onto one instant T (shorter than MIN_LINE_SECONDS; a
+ * loop often collapses onto its segment's end, so the segment end says nothing) time on screen
+ * without moving the lines around them. The n lines collapsed at T share, in their raw order, at
+ * most n seconds of free time:
+ *   1. after T, up to the next line's start or the end of the audio;
+ *   2. before T, back to the previous line's end, when a line with real timing starts at T, the
+ *      audio ends at T, or the time after T would leave each line under MIN_LINE_SECONDS while
+ *      there is more before (the collapsed timestamp sits on the segment end: the words came before);
+ *   3. with no free time on either side, each takes a second and resolveOverlaps moves it after
+ *      the line it overlaps.
+ * Instants are handled in time order, so a line placed earlier counts as taken time.
+ */
+function placeCollapsed(drafts: SegmentDraft[], duration: number | null): SegmentDraft[] {
+  const out = drafts.map(d => ({ ...d }))
+  const collapsed = out.map(d => d.end - d.start < MIN_LINE_SECONDS)
+  // Time order; lines that start together keep their raw order.
+  const order = out.map((_, i) => i).sort((a, b) => out[a]!.start - out[b]!.start || a - b)
+  let takenUntil = 0 // the latest end of the lines that start before the current instant
+  for (let p = 0; p < order.length;) {
+    const t = out[order[p]!]!.start
+    let q = p
+    while (q < order.length && out[order[q]!]!.start === t) q++
+    const atT = order.slice(p, q)
+    const group = atT.filter(i => collapsed[i]).map(i => out[i]!)
+    if (group.length) {
+      const n = group.length
+      const want = n * COLLAPSED_LINE_SECONDS
+      const realAtT = atT.some(i => !collapsed[i])
+      const nextStart = q < order.length ? out[order[q]!]!.start : (duration ?? t + want)
+      const after = realAtT ? 0 : Math.max(0, round3(Math.min(nextStart, t + want) - t))
+      const before = Math.max(0, round3(t - Math.max(takenUntil, t - want)))
+      const useAfter = after >= n * MIN_LINE_SECONDS || after >= before
+      const span = useAfter ? after : before
+      const from = useAfter ? t : t - before
+      group.forEach((d, k) => {
+        if (span > 0) {
+          d.start = round3(from + (span * k) / n)
+          d.end = round3(from + (span * (k + 1)) / n)
+        }
+        else {
+          d.end = round3(d.start + COLLAPSED_LINE_SECONDS)
+        }
+      })
+    }
+    for (const i of atT) takenUntil = Math.max(takenUntil, out[i]!.end)
+    p = q
+  }
+  return out
 }
 
 /**
