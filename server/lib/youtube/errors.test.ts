@@ -9,11 +9,14 @@ const E = (text: string) => `ERROR: [youtube] abcdefghijk: ${text}`
 
 const LIVE = '還在直播中或還沒開始的直播不能加入，結束後再來'
 const NETWORK = '連不到 YouTube 或連線中斷，請確認網路連線後再試'
+const DISK_FULL = '硬碟空間不足，請清出空間後再按「重試」（下載會接著來；合併影音時暫時需要約兩倍的空間）'
+/** A connection dropped while the body was read, as a download that used up its retries prints it (urllib3 repr, no "caused by"). */
+const broken = (error: string) => `ERROR: [download] Got error: ("Connection broken: ${error}", ${error}). Giving up after 10 retries`
 
 // Every row of design.md「YouTube」's error table, with real or source-derived yt-dlp texts.
 const TABLE: Array<[YtdlpErrorKind, string, string]> = [
-  ['private', E('Private video. Sign in if you\'ve been granted access to this video. Use --cookies-from-browser or --cookies for the authentication.'), '這是私人影片，無法下載'],
-  ['private', E('PRIVATE VIDEO'), '這是私人影片，無法下載'],
+  ['private', E('Private video. Sign in if you\'ve been granted access to this video. Use --cookies-from-browser or --cookies for the authentication.'), '這是私人影片，無法下載（自己的影片可以先在 YouTube Studio 改成「不公開」再加入）'],
+  ['private', E('PRIVATE VIDEO'), '這是私人影片，無法下載（自己的影片可以先在 YouTube Studio 改成「不公開」再加入）'],
   ['members-only', E('Join this channel to get access to members-only content like this video, and other exclusive perks.'), '這是頻道會員限定影片，無法下載'],
   ['members-only', E('This video is available to this channel\'s members on level: Fan (or any higher level). Join this channel to get access'), '這是頻道會員限定影片，無法下載'],
   ['members-only', E('availability subscriber_only'), '這是頻道會員限定影片，無法下載'],
@@ -35,13 +38,18 @@ const TABLE: Array<[YtdlpErrorKind, string, string]> = [
   ['blocked', 'ERROR: Unable to download video subtitles for \'live_chat\': HTTP Error 429: Too Many Requests', 'YouTube 暫時拒絕這台電腦的連線（被當成機器人或請求太頻繁），請過一段時間再按「重試」'],
   ['blocked', E('Video unavailable. This content isn\'t available, try again later. The current session has been rate-limited by YouTube for up to an hour.'), 'YouTube 暫時拒絕這台電腦的連線（被當成機器人或請求太頻繁），請過一段時間再按「重試」'],
   ['blocked', E('Your IP is likely being blocked by Youtube'), 'YouTube 暫時拒絕這台電腦的連線（被當成機器人或請求太頻繁），請過一段時間再按「重試」'],
-  ['outdated', 'ERROR: unable to download video data: HTTP Error 403: Forbidden', 'YouTube 可能改版了，yt-dlp 需要更新：關掉 gg-highlight 再重新開啟會自動更新，然後按「重試」'],
-  ['outdated', 'ERROR: [youtube] abcdefghijk: Requested format is not available. Use --list-formats for a list of available formats', 'YouTube 可能改版了，yt-dlp 需要更新：關掉 gg-highlight 再重新開啟會自動更新，然後按「重試」'],
-  ['outdated', E('Unable to extract yt initial data'), 'YouTube 可能改版了，yt-dlp 需要更新：關掉 gg-highlight 再重新開啟會自動更新，然後按「重試」'],
-  ['outdated', E('Signature extraction failed: Some formats may be missing'), 'YouTube 可能改版了，yt-dlp 需要更新：關掉 gg-highlight 再重新開啟會自動更新，然後按「重試」'],
-  ['outdated', E('nsig extraction failed: You may experience throttling'), 'YouTube 可能改版了，yt-dlp 需要更新：關掉 gg-highlight 再重新開啟會自動更新，然後按「重試」'],
+  ['outdated', 'ERROR: unable to download video data: HTTP Error 403: Forbidden', 'YouTube 可能改版了，yt-dlp 需要更新：關掉 gg-highlight 的黑色命令列視窗、再雙擊 start.bat 會自動更新，然後按「重試」'],
+  ['outdated', 'ERROR: [youtube] abcdefghijk: Requested format is not available. Use --list-formats for a list of available formats', 'YouTube 可能改版了，yt-dlp 需要更新：關掉 gg-highlight 的黑色命令列視窗、再雙擊 start.bat 會自動更新，然後按「重試」'],
+  ['outdated', E('Unable to extract yt initial data'), 'YouTube 可能改版了，yt-dlp 需要更新：關掉 gg-highlight 的黑色命令列視窗、再雙擊 start.bat 會自動更新，然後按「重試」'],
+  ['outdated', E('Signature extraction failed: Some formats may be missing'), 'YouTube 可能改版了，yt-dlp 需要更新：關掉 gg-highlight 的黑色命令列視窗、再雙擊 start.bat 會自動更新，然後按「重試」'],
+  ['outdated', E('nsig extraction failed: You may experience throttling'), 'YouTube 可能改版了，yt-dlp 需要更新：關掉 gg-highlight 的黑色命令列視窗、再雙擊 start.bat 會自動更新，然後按「重試」'],
   ['ffmpeg-missing', 'ERROR: You have requested merging of multiple formats but ffmpeg is not installed. Aborting due to --abort-on-error', '找不到 FFmpeg，請重新執行 setup.bat'],
   ['ffmpeg-missing', 'ERROR: Postprocessing: ffmpeg not found. Please install or provide the path using --ffmpeg-location', '找不到 FFmpeg，請重新執行 setup.bat'],
+  // yt-dlp 2026.10.26 downloader/http.py "unable to write data: {err}", the ffmpeg merge, Windows' own error.
+  ['disk-full', 'ERROR: unable to write data: [Errno 28] No space left on device', DISK_FULL],
+  ['disk-full', 'ERROR: Postprocessing: Error writing trailer of C:\\gg\\data\\downloads\\abc.temp.mp4: No space left on device', DISK_FULL],
+  ['disk-full', 'ERROR: [WinError 112] There is not enough space on the disk', DISK_FULL],
+  ['disk-full', 'ERROR: [WinError 112] 磁碟空間不足。', DISK_FULL],
   // Real yt-dlp 2026.10.26 output through an unreachable proxy / a failing TLS check, and Python's texts.
   ['network', E('Unable to download API page: (\'Unable to connect to proxy\', NewConnectionError(\'<urllib3.connection.HTTPSConnection object at 0x7f>: Failed to establish a new connection: [Errno 111] Connection refused\')) (caused by ProxyError("(\'Unable to connect to proxy\', NewConnectionError(...))")); please report this issue on  https://github.com/yt-dlp/yt-dlp/issues?q= , filling out the appropriate issue template. Confirm you are on the latest version using  yt-dlp -U'), NETWORK],
   ['network', E('Unable to download API page: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed (_ssl.c:1010) (caused by CertificateVerifyError(\'[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed\'))'), NETWORK],
@@ -50,6 +58,13 @@ const TABLE: Array<[YtdlpErrorKind, string, string]> = [
   ['network', 'ERROR: [download] Got error: (\'Connection aborted.\', ConnectionResetError(10054, \'遠端主機已強制關閉一個現存的連線。\', None, 10054, None)). Giving up after 10 retries', NETWORK],
   ['network', 'ERROR: [download] Got error: [WinError 10060] 連線嘗試失敗. Giving up after 10 retries', NETWORK],
   ['network', 'ERROR: [download] Got error: The read operation timed out. Giving up after 10 retries', NETWORK],
+  // Real yt-dlp 2026.10.26 through a proxy that answers CONNECT with 502, and a reset mid-body (Linux).
+  ['network', 'ERROR: [download] Got error: (\'Unable to connect to proxy\', OSError(\'Tunnel connection failed: 502 Bad Gateway\')). Giving up after 10 retries', NETWORK],
+  ['network', broken('ConnectionResetError(104, \'Connection reset by peer\')'), NETWORK],
+  // The same reset and an abort on Windows: the error code only in repr form, the message in the OS language.
+  ['network', broken('ConnectionResetError(10054, \'An existing connection was forcibly closed by the remote host\', None, 10054, None)'), NETWORK],
+  ['network', broken('ConnectionResetError(10054, \'遠端主機已強制關閉一個現存的連線。\', None, 10054, None)'), NETWORK],
+  ['network', broken('ConnectionAbortedError(10053, \'連線已被您主機上的軟體中止。\', None, 10053, None)'), NETWORK],
 ]
 
 describe('mapYtdlpError: design.md error table', () => {
@@ -68,6 +83,21 @@ describe('mapYtdlpError: design.md error table', () => {
     expect(classifyErrorLine('ERROR: [download] Got error: HTTP Error 403: Forbidden. Giving up after 10 retries')).toBe('outdated')
     // A server error under retries is not a known row: shown with its reason.
     expect(classifyErrorLine('ERROR: [download] Got error: HTTP Error 500: Internal Server Error. Giving up after 10 retries')).toBe('unknown')
+  })
+
+  it('a Windows network error code counts in [WinError N] and in repr form, other numbers do not', () => {
+    expect(classifyErrorLine('ERROR: [download] Got error: ConnectionResetError(10054, \'x\', None, 10054, None). Giving up after 10 retries')).toBe('network')
+    expect(classifyErrorLine('ERROR: [download] Got error: TimeoutError(10060, \'連線嘗試失敗\', None, 10060, None). Giving up after 10 retries')).toBe('network')
+    expect(classifyErrorLine('ERROR: [download] Got error: OSError(100540, \'x\'). Giving up after 10 retries')).toBe('unknown')
+    expect(classifyErrorLine('ERROR: [download] Got error: [Errno 280] x. Giving up after 10 retries')).toBe('unknown')
+  })
+
+  it('a full disk is not an "update yt-dlp" hint and wins over the YouTube-side rows', () => {
+    const error = mapYtdlpError(['ERROR: unable to download video data: HTTP Error 403: Forbidden', 'ERROR: unable to write data: [Errno 28] No space left on device'], { code: 1 })
+    expect(error.kind).toBe('disk-full')
+    expect(error.suggestsUpdate).toBe(false)
+    expect(error.httpStatus).toBe(502)
+    expect(ytdlpErrorCause(error)).toBe('硬碟空間不足')
   })
 
   it('upcoming and network failures are not "update yt-dlp" hints: 422 / 502 and the stamp stays', () => {
@@ -117,7 +147,7 @@ describe('mapYtdlpError: design.md error table', () => {
     const line = 'ERROR: [youtube] abcdefghijk: Something new happened'
     expect(mapYtdlpError([line], { code: 1 }, undefined, METADATA_FAILED_PREFIX).message).toBe(`向 YouTube 讀取影片資訊失敗：${line}`)
     expect(mapYtdlpError([], { code: 1 }, undefined, METADATA_FAILED_PREFIX).message).toBe('向 YouTube 讀取影片資訊失敗：yt-dlp 異常結束（結束碼 1）')
-    expect(mapYtdlpError([E('Private video')], { code: 1 }, undefined, METADATA_FAILED_PREFIX).message).toBe('這是私人影片，無法下載')
+    expect(mapYtdlpError([E('Private video')], { code: 1 }, undefined, METADATA_FAILED_PREFIX).message).toBe('這是私人影片，無法下載（自己的影片可以先在 YouTube Studio 改成「不公開」再加入）')
   })
 
   it('without any ERROR line names the exit status, or uses the fallback', () => {
@@ -142,14 +172,14 @@ describe('mapYtdlpError: design.md error table', () => {
 describe('ytdlpErrorCause: the reason without an action, for places without a 重試 button', () => {
   it('drops the 「…按「重試」」 / 請…再試 action of the kinds that have one', () => {
     expect(ytdlpErrorCause(new YtdlpError('blocked', YTDLP_ERROR_MESSAGES.blocked!))).toBe('YouTube 暫時拒絕這台電腦的連線（被當成機器人或請求太頻繁）')
-    expect(ytdlpErrorCause(new YtdlpError('outdated', YTDLP_ERROR_MESSAGES.outdated!))).toBe('YouTube 可能改版了，yt-dlp 需要更新（關掉 gg-highlight 再重新開啟會自動更新）')
+    expect(ytdlpErrorCause(new YtdlpError('outdated', YTDLP_ERROR_MESSAGES.outdated!))).toBe('YouTube 可能改版了，yt-dlp 需要更新（關掉 gg-highlight 的黑色命令列視窗、再雙擊 start.bat 會自動更新）')
     expect(ytdlpErrorCause(new YtdlpError('network', YTDLP_ERROR_MESSAGES.network!))).toBe('連不到 YouTube 或連線中斷')
     expect(ytdlpErrorCause(new YtdlpError('timeout', YTDLP_ERROR_MESSAGES.timeout!))).toBe('向 YouTube 讀取影片資訊逾時')
     for (const cause of Object.values(YTDLP_ERROR_CAUSES)) expect(cause).not.toMatch(/重試|再試/)
   })
 
   it('keeps other messages; an unknown error loses only the generic 下載失敗：', () => {
-    expect(ytdlpErrorCause(new YtdlpError('private', YTDLP_ERROR_MESSAGES.private!))).toBe('這是私人影片，無法下載')
+    expect(ytdlpErrorCause(new YtdlpError('private', YTDLP_ERROR_MESSAGES.private!))).toBe('這是私人影片，無法下載（自己的影片可以先在 YouTube Studio 改成「不公開」再加入）')
     expect(ytdlpErrorCause(mapYtdlpError(['ERROR: something new'], { code: 1 }))).toBe('ERROR: something new')
     expect(ytdlpErrorCause(new YtdlpError('unknown', '向 YouTube 讀取影片資訊失敗：ERROR: x'))).toBe('向 YouTube 讀取影片資訊失敗：ERROR: x')
     expect(ytdlpErrorCause(new YtdlpError('unknown', '', 'detail'))).toBe('detail')
@@ -182,6 +212,7 @@ describe('noteUpdateHint', () => {
     await noteUpdateHint(new YtdlpError('private', 'x'), { updateStampPath: file })
     await noteUpdateHint(new YtdlpError('blocked', 'x'), { updateStampPath: file })
     await noteUpdateHint(new YtdlpError('network', 'x'), { updateStampPath: file })
+    await noteUpdateHint(new YtdlpError('disk-full', 'x'), { updateStampPath: file })
     await noteUpdateHint(new YtdlpError('live', 'x'), { updateStampPath: file })
     await noteUpdateHint(new Error('boom'), { updateStampPath: file })
     await noteUpdateHint(new YtdlpError('outdated', 'x'), { updateStampPath: null })

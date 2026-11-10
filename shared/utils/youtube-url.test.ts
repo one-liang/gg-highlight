@@ -28,6 +28,12 @@ describe('parseYoutubeUrl', () => {
     `https://www.youtube-nocookie.com/embed/${ID}`,
     `https://youtube-nocookie.com/embed/${ID}`,
     `https://www.youtube.com/watch?v=${ID}#t=30`,
+    // YouTube Studio's pages of one video (where a streamer manages past streams).
+    `https://studio.youtube.com/video/${ID}/edit`,
+    `https://studio.youtube.com/video/${ID}/livestreaming`,
+    `https://studio.youtube.com/video/${ID}/analytics/tab-overview/period-default`,
+    `https://studio.youtube.com/video/${ID}/comments/inbox?filter=%5B%5D`,
+    `studio.youtube.com/video/${ID}/edit`,
   ])('accepts %s', (input) => {
     expect(parseYoutubeUrl(input)).toEqual({ ok: true, id: ID, url: CANONICAL })
   })
@@ -91,6 +97,9 @@ describe('parseYoutubeUrl', () => {
     'https://www.youtube.com/feed/subscriptions',
     'https://www.youtube.com/SomeLegacyName',
     'http://[::1',
+    'https://studio.youtube.com/',
+    'https://studio.youtube.com/video/short/edit',
+    `https://studio.youtube.com/watch?v=${ID}`,
   ])('rejects non-YouTube or malformed input: %j', (input) => {
     expect(parseYoutubeUrl(input)).toEqual({ ok: false, reason: 'not-youtube', message: NOT_YOUTUBE_MESSAGE })
   })

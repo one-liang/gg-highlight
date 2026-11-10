@@ -30,6 +30,8 @@ export type YtdlpErrorKind =
   /** Offline, DNS, proxy / TLS failures, a dropped or timed-out connection. */
   | 'network'
   | 'ffmpeg-missing'
+  /** No space left on the disk of data/downloads (while downloading or merging). */
+  | 'disk-full'
   /** The yt-dlp executable could not be started. */
   | 'not-installed'
   /** live_status is_live, or a stream / premiere that has not started (yt-dlp's "This live event will begin…"). */

@@ -110,7 +110,7 @@ describe('parseYoutubeLink', () => {
 
 describe('youtubeHttpError', () => {
   it('uses the YtdlpError status and text: 422 for the video, 502 for YouTube or the tool', () => {
-    expect(statusOf(youtubeHttpError(new YtdlpError('private', YTDLP_ERROR_MESSAGES.private!)))).toEqual({ statusCode: 422, statusMessage: '這是私人影片，無法下載' })
+    expect(statusOf(youtubeHttpError(new YtdlpError('private', YTDLP_ERROR_MESSAGES.private!)))).toEqual({ statusCode: 422, statusMessage: '這是私人影片，無法下載（自己的影片可以先在 YouTube Studio 改成「不公開」再加入）' })
     expect(statusOf(youtubeHttpError(new YtdlpError('post-live', YTDLP_ERROR_MESSAGES['post-live']!)))).toEqual({ statusCode: 422, statusMessage: YTDLP_ERROR_MESSAGES['post-live'] })
     expect(statusOf(youtubeHttpError(new YtdlpError('blocked', YTDLP_ERROR_MESSAGES.blocked!)))).toEqual({ statusCode: 502, statusMessage: YTDLP_ERROR_MESSAGES.blocked })
     expect(statusOf(youtubeHttpError(new YtdlpError('unknown', '下載失敗：ERROR: boom')))).toEqual({ statusCode: 502, statusMessage: '下載失敗：ERROR: boom' })

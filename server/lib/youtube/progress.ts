@@ -78,10 +78,14 @@ export function parseFileLine(line: string): string | null {
  * Overall progress of one video download from its GGDL lines. Formats count in the order they first
  * appear: the first one covers 0–0.9, the second 0.9–1. yt-dlp's lines do not say whether a second
  * format follows, so a single-format download reaches 0.9 and its caller reports 1 when the file is done.
+ * A format counts only once the one before it has reported 'finished' (yt-dlp also does for a part
+ * already on disk): when the video part gives up, yt-dlp (ignoreerrors 'only_download', its CLI default)
+ * still downloads the audio before the run fails, and the bar must not jump to 90 % for that.
  * Never goes backwards.
  */
 export class DownloadProgress {
   private readonly formats: string[] = []
+  private readonly finished = new Set<string>()
   private current = 0
 
   /** Feeds one output line; returns the new overall fraction when it moved forward, else null. */
@@ -90,9 +94,12 @@ export class DownloadProgress {
     if (!p) return null
     let index = this.formats.indexOf(p.formatId)
     if (index < 0) {
+      const previous = this.formats.at(-1)
+      if (previous !== undefined && !this.finished.has(previous)) return null
       this.formats.push(p.formatId)
       index = this.formats.length - 1
     }
+    if (p.status === 'finished') this.finished.add(p.formatId)
     const f = formatFraction(p)
     if (f === null) return null
     const overall = index === 0 ? f * FIRST_FORMAT_SHARE : index === 1 ? FIRST_FORMAT_SHARE + f * (1 - FIRST_FORMAT_SHARE) : 1

@@ -27,7 +27,7 @@
   - 語音辨識模型約 5 GB（中文 Breeze-ASR-25 約 3 GB、英文 large-v3-turbo 約 1.6 GB），放在 Hugging Face 快取（`%USERPROFILE%\.cache\huggingface`）。
   - Ollama 模型 qwen3.5:9b 約 6.6 GB，放在 `%USERPROFILE%\.ollama\models`（要換位置可以設定 Ollama 的環境變數 `OLLAMA_MODELS`）。
   - Python 環境約 1–2 GB、Node.js 套件約 0.5 GB、YouTube 下載工具（yt-dlp 與 Deno，放在 `tools/`）約 150 MB。
-  - 再加上影片：拖拉上傳的影片會複製一份到 `data/uploads/`；YouTube 影片下載到 `data/downloads/`（1080p 的 3 小時直播約 4–8 GB）；輸出的剪輯放在 `data/clips/`。從「影片資料夾」加入的影片不會複製。
+  - 再加上影片：拖拉上傳的影片會複製一份到 `data/uploads/`；YouTube 影片下載到 `data/downloads/`（1080p 的 3 小時直播約 4–8 GB，下載合併時暫時需要約兩倍的空間）；輸出的剪輯放在 `data/clips/`。從「影片資料夾」加入的影片不會複製。
 
 ## 安裝
 
@@ -130,7 +130,7 @@
 
 ### 加入 YouTube 影片
 
-1. 按「加入影片」→「**YouTube**」分頁，貼上影片連結。`youtube.com/watch?v=…`、`youtu.be/…`、`/live/…`、`/shorts/…` 這些網址都可以；連結裡的播放清單、時間點等參數會被忽略，只加入那一支影片。
+1. 按「加入影片」→「**YouTube**」分頁，貼上影片連結。`youtube.com/watch?v=…`、`youtu.be/…`、`/live/…`、`/shorts/…`，以及 YouTube 工作室裡那支影片的網址（`studio.youtube.com/video/…`）都可以；連結裡的播放清單、時間點等參數會被忽略，只加入那一支影片。
 2. 按「**讀取影片資訊**」（通常 5–20 秒）：會顯示標題、頻道、長度、是不是直播重播、有沒有聊天室重播、有沒有重播熱度。同一支影片已經在影片庫時會直接告訴你，不能重複加入。
 3. 選語言（會依影片資訊預選），按「**下載並開始分析**」。
 
@@ -166,6 +166,7 @@ YouTube 影片多了兩種訊號（見「自動找精華」）。「這次的候
 | 「YouTube 暫時拒絕這台電腦的連線（被當成機器人或請求太頻繁）」 | YouTube 會擋短時間內讀取太多影片的電腦（`Sign in to confirm you’re not a bot`、`HTTP Error 429`）。等一段時間（通常一小時以上）再按「重試」，不要一直重試。 |
 | 「YouTube 可能改版了，yt-dlp 需要更新」 | YouTube 改版後舊版 yt-dlp 會下載失敗。關掉 gg-highlight（關閉黑色視窗）再雙擊 `start.bat`，啟動時會自動更新 yt-dlp，然後按「重試」。更新後還是不行，見下面的「換成 nightly 版」。 |
 | 「連不到 YouTube 或連線中斷，請確認網路連線後再試」 | 電腦沒有連上網路、DNS 或 Proxy 有問題，或下載途中連線斷掉。確認網路之後按「重試」（下載會從已下載的部分接著來）。 |
+| 「硬碟空間不足，請清出空間後再按「重試」」 | 放 `data/` 的磁碟滿了。影片與音訊分開下載、最後合併成一個檔案，合併時暫時需要約兩倍的影片大小（3 小時的 1080p 直播要預留約 8–16 GB）。清出空間（例如從影片庫移除不需要的影片）後按「重試」，已下載的部分會保留。 |
 | 「聊天室重播下載失敗：…」「無法取得重播熱度：…」 | 這次分析沒用到聊天室或重播熱度，其他訊號照常。原因排除後（例如過一段時間、網路恢復），按「重新分析」→「只重新找精華片段」會再試一次，不用重新辨識語音。 |
 | 搬移專案資料夾後 YouTube 不能用（「yt-dlp 異常結束」） | 程式管理的 yt-dlp 記的是安裝時的位置。關掉 gg-highlight 再雙擊 `start.bat`：失敗過一次之後，啟動時會檢查 yt-dlp 能不能執行，不能就自動重新安裝。還是不行就刪掉專案裡的 `tools` 資料夾，再雙擊 `start.bat`。 |
 | 啟動時顯示「無法更新 yt-dlp（只影響 YouTube）」或「無法安裝 yt-dlp」 | 通常是網路連不到 PyPI（pypi.org）。其他功能照常可用，下次啟動會再試；寫「找不到 uv」時請重新執行 `setup.bat`。 |
@@ -261,7 +262,7 @@ pnpm 的設定放在 `pnpm-workspace.yaml`（pnpm 11 起不讀 `package.json` �
 其他腳本：
 
 - `node scripts/doctor.mjs [--json]`：環境檢查；`--json` 輸出機器可讀的結果。必要項目沒通過時結束代碼是 1（Ollama、NVENC、yt-dlp 這類選用項目只會提醒）。
-- `node scripts/ytdlp.mjs install|ensure`：程式自己管理的 yt-dlp（`uv tool`，`UV_TOOL_DIR=tools/uv`、`UV_TOOL_BIN_DIR=tools/bin`）。`install` 安裝或更新（setup.bat）；`ensure` 沒有就安裝、超過 24 小時沒檢查就 `uv tool upgrade yt-dlp`（`start.mjs` 在伺服器啟動前執行；伺服器遇到「可能改版了」或不明的 yt-dlp 錯誤時會刪掉 `tools/.yt-dlp-checked`，下次啟動就一定檢查，並確認 `yt-dlp --version` 能執行，不能就 `uv tool install --reinstall`；`install` 也會確認）。設定了 `GG_YTDLP_CMD` 時兩者都不做事。
+- `node scripts/ytdlp.mjs install|ensure`：程式自己管理的 yt-dlp（`uv tool`，`UV_TOOL_DIR=tools/uv`、`UV_TOOL_BIN_DIR=tools/bin`）。`install` 安裝或更新（setup.bat）；`ensure` 沒有就安裝、超過 24 小時沒檢查就 `uv tool upgrade yt-dlp`（`start.mjs` 在伺服器啟動前執行；伺服器遇到「可能改版了」或不明的 yt-dlp 錯誤時會刪掉 `tools/.yt-dlp-checked`，下次啟動就一定檢查，並確認 `yt-dlp --version` 能執行，不能就 `uv tool install --reinstall --force`；`install` 也會確認，它用 `uv tool install --upgrade --force`）。設定了 `GG_YTDLP_CMD` 時兩者都不做事。
 - `node scripts/fetch-fonts.mjs [--force] [--no-download]`：取得字幕字型（下載 → 複製系統已安裝的 Noto Sans CJK → 提示手動下載）。
 - `scripts/setup.ps1`：setup.bat 呼叫的 PowerShell 安裝腳本。
 

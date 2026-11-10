@@ -75,10 +75,30 @@ describe('DownloadProgress', () => {
   it('a format seen again keeps its slot; a third format counts as done', () => {
     const p = new DownloadProgress()
     p.push(line('137', { downloaded_bytes: 10, total_bytes: 100 }))
+    p.push(line('137', { status: 'finished', downloaded_bytes: 100, total_bytes: 100 }))
     p.push(line('140', { downloaded_bytes: 1, total_bytes: 10 }))
     expect(p.value).toBeCloseTo(0.91)
     expect(p.push(line('137', { status: 'finished' }))).toBeNull()
-    expect(p.push(line('999', { downloaded_bytes: 1, total_bytes: 10 }))).toBe(1)
+    expect(p.push(line('140', { status: 'finished' }))).toBe(1)
+    expect(p.push(line('999', { downloaded_bytes: 1, total_bytes: 10 }))).toBeNull()
+  })
+
+  it('counts the next format only after the one before it finished (a video part that gave up)', () => {
+    // Real yt-dlp 2026.10.26 against a server that drops every connection after 1 MiB: format 137 gives
+    // up after its retries, yt-dlp still downloads 140, then exits 1.
+    const p = new DownloadProgress()
+    expect(p.push(line('137', { status: 'downloading', downloaded_bytes: 4190208, total_bytes: 24651883 }))).toBeCloseTo(0.153, 3)
+    expect(p.push(line('137', { status: 'downloading', downloaded_bytes: 8380416, total_bytes: 24651883 }))).toBeCloseTo(0.306, 3)
+    expect(p.push('ERROR:  [download] Got error: 1048576 bytes read, 8987961 more expected. Giving up after 10 retries')).toBeNull()
+    expect(p.push(line('140', { status: 'downloading', downloaded_bytes: 1024, total_bytes: 194404 }))).toBeNull()
+    expect(p.push(line('140', { status: 'finished', downloaded_bytes: 194404, total_bytes: 194404 }))).toBeNull()
+    expect(p.value).toBeCloseTo(0.306, 3)
+  })
+
+  it('a part already on disk reports finished, so the next one counts', () => {
+    const p = new DownloadProgress()
+    expect(p.push(line('137', { status: 'finished', total_bytes: 24651883 }))).toBeCloseTo(0.9)
+    expect(p.push(line('140', { status: 'downloading', downloaded_bytes: 97202, total_bytes: 194404 }))).toBeCloseTo(0.95)
   })
 
   it('uses fragments when the bytes have no total', () => {

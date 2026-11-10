@@ -13,22 +13,31 @@ import { isMain, projectRoot } from './lib/common.mjs'
 
 /** `default` brings yt-dlp-ejs (YouTube's JS challenges), `deno` a sandboxed JS runtime. */
 export const YTDLP_REQUIREMENT = 'yt-dlp[default,deno]'
-/** Re-asserts the requirement and recreates a missing tools/bin/yt-dlp(.exe). */
-export const INSTALL_ARGS = ['tool', 'install', '--upgrade', YTDLP_REQUIREMENT]
+/**
+ * Re-asserts the requirement and recreates a missing tools/bin/yt-dlp(.exe). `--force`: tools/bin
+ * belongs to the app, so an executable uv has no record of at that path (a moved project folder, see
+ * REINSTALL_ARGS, or a copy made by hand) is overwritten instead of failing the install.
+ */
+export const INSTALL_ARGS = ['tool', 'install', '--upgrade', '--force', YTDLP_REQUIREMENT]
 /** Keeps the settings of the install (a manual nightly install stays on nightly). */
 export const UPGRADE_ARGS = ['tool', 'upgrade', 'yt-dlp']
 /**
  * Rebuilds the tool environment (from uv's cache when it can). Repairs a yt-dlp whose environment
  * broke: its launcher keeps the absolute path of the environment's Python, so a moved project folder
  * or a removed Python breaks it, while `uv tool upgrade` answers "Nothing to upgrade" and
- * `install --upgrade` leaves it broken.
+ * `install --upgrade` leaves it broken. `--force` because of the moved folder on Windows: uv's receipt
+ * names the executable by its old absolute path, so uv does not remove the copy at the new path (on
+ * Windows tools/bin/yt-dlp.exe is a copy, not a symlink that dangles after the move), and without
+ * `--force` it stops with "Executable already exists" and deletes the environment it just built.
  */
-export const REINSTALL_ARGS = ['tool', 'install', '--reinstall', YTDLP_REQUIREMENT]
+export const REINSTALL_ARGS = ['tool', 'install', '--reinstall', '--force', YTDLP_REQUIREMENT]
 /** `yt-dlp --version` after an install or a check the server asked for (the first run may compile .pyc files). */
 export const VERSION_TIMEOUT_MS = 30_000
 export const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
 /** A `uv tool upgrade` was once seen hanging for minutes; a retry finished in seconds. */
 export const UV_TIMEOUT_MS = 180_000
+/** Install and repair download yt-dlp + Deno (about 45 MB): give a slow connection more time than an update check. */
+export const INSTALL_TIMEOUT_MS = 600_000
 
 const UV_MISSING = '找不到 uv，請重新執行 setup.bat'
 
@@ -208,6 +217,7 @@ export async function ensurePlan({ root = projectRoot, env = process.env, platfo
  *   run?: typeof runProcess,
  *   log?: (msg: string) => void,
  *   timeoutMs?: number,
+ *   installTimeoutMs?: number,
  * }} YtdlpOptions
  */
 
@@ -220,11 +230,12 @@ function resolveOptions(opts) {
     run: opts.run ?? runProcess,
     log: opts.log ?? (msg => console.log(msg)),
     timeoutMs: opts.timeoutMs ?? UV_TIMEOUT_MS,
+    installTimeoutMs: opts.installTimeoutMs ?? INSTALL_TIMEOUT_MS,
   }
 }
 
-function runUv(o, args) {
-  return o.run('uv', args, { cwd: o.root, env: uvEnv(o.root, o.env, o.platform), timeoutMs: o.timeoutMs, platform: o.platform })
+function runUv(o, args, timeoutMs = o.timeoutMs) {
+  return o.run('uv', args, { cwd: o.root, env: uvEnv(o.root, o.env, o.platform), timeoutMs, platform: o.platform })
 }
 
 function skipped() {
@@ -252,16 +263,16 @@ function runVersion(o) {
 /**
  * After an install, or an upgrade the server asked for (it deletes the stamp after an unknown yt-dlp
  * failure, which is what a broken environment gives): `yt-dlp --version` must work, else one
- * `uv tool install --reinstall` and a second check. Resolves with { ok: true, repaired } or the
+ * `uv tool install --reinstall --force` and a second check. Resolves with { ok: true, repaired } or the
  * failure result (no stamp is written then, so the next start checks again).
  */
 async function verify(o, verb) {
   const first = await runVersion(o)
   if (first.ok) return { ok: true, repaired: false }
   o.log(`▶ yt-dlp 無法執行（${versionFailure(first)}），重新安裝…`)
-  const r = await runUv(o, REINSTALL_ARGS)
+  const r = await runUv(o, REINSTALL_ARGS, o.installTimeoutMs)
   const fix = '請刪掉專案裡的 tools 資料夾，再雙擊 start.bat 重新安裝（需要網路）'
-  if (!r.ok) return failed(o, verb, `yt-dlp 無法執行，重新安裝也失敗（${failureReason(r, o.timeoutMs)}）；${fix}`)
+  if (!r.ok) return failed(o, verb, `yt-dlp 無法執行，重新安裝也失敗（${failureReason(r, o.installTimeoutMs)}）；${fix}`)
   const second = await runVersion(o)
   if (second.ok) return { ok: true, repaired: true }
   return failed(o, verb, `重新安裝後 yt-dlp 還是無法執行（${versionFailure(second)}）；${fix}`)
@@ -272,8 +283,8 @@ const REPAIRED_MESSAGE = '已重新安裝 yt-dlp（原本的無法執行，例�
 async function doInstall(o) {
   const paths = ytdlpPaths(o.root, o.platform)
   o.log('▶ 安裝 yt-dlp（YouTube 下載工具，只有第一次需要，大約 1 分鐘）…')
-  const r = await runUv(o, INSTALL_ARGS)
-  if (!r.ok) return failed(o, '安裝', failureReason(r, o.timeoutMs))
+  const r = await runUv(o, INSTALL_ARGS, o.installTimeoutMs)
+  if (!r.ok) return failed(o, '安裝', failureReason(r, o.installTimeoutMs))
   if (!fs.existsSync(paths.exe)) return failed(o, '安裝', `uv 執行完了，但找不到 ${paths.exe}`)
   const check = await verify(o, '安裝')
   if (!check.ok) return check
@@ -290,7 +301,8 @@ async function doUpgrade(o, forceCheck) {
   o.log('▶ 檢查 yt-dlp 更新…')
   const r = await runUv(o, UPGRADE_ARGS)
   if (!r.ok) {
-    // An executable without uv's record of it (e.g. copied by hand): install over it.
+    // An executable without uv's record of it (copied by hand, or left behind when uv removed the
+    // environment): install over it (INSTALL_ARGS has --force).
     if (/is not installed/i.test(`${r.stderr}\n${r.stdout}`)) return doInstall(o)
     return failed(o, '更新', failureReason(r, o.timeoutMs))
   }

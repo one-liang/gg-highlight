@@ -138,7 +138,7 @@
 #### 加入
 
 - 「加入影片」的「YouTube」分頁：貼上連結 → 「讀取影片資訊」（`POST /api/youtube/probe`，通常 5–20 秒）→ 顯示標題、頻道、長度、是不是直播重播、有沒有聊天室重播、有沒有重播熱度，以及授權提醒 → 選語言 → 「下載並開始分析」（`POST /api/videos`）。
-- 連結：接受 `youtube.com/watch?v=`、`youtu.be/`、`/live/`、`/shorts/`、`/embed/`、`m.`／`music.`／`youtube-nocookie.com`；影片 ID 是 11 個 `[A-Za-z0-9_-]` 字元。`list=`、`t=`、`si=` 等參數丟掉，一律轉成 `https://www.youtube.com/watch?v=<ID>`（單一影片，不下載播放清單）。只有播放清單（`/playlist?list=`）、頻道（`/@名稱`、`/channel/`、`/c/`、`/user/`）或搜尋的連結 → 422「不支援播放清單或頻道，請貼單一影片的連結」；不是 YouTube 的連結 → 400「這不是 YouTube 影片連結」。前端用同一個解析函式（`shared/utils/youtube-url.ts`）即時提示。
+- 連結：接受 `youtube.com/watch?v=`、`youtu.be/`、`/live/`、`/shorts/`、`/embed/`、`m.`／`music.`／`youtube-nocookie.com`，以及 YouTube 工作室的 `studio.youtube.com/video/<ID>/…`（實況主管理過去直播的地方，網址列是 `/edit`、`/livestreaming`、`/analytics/…`）；影片 ID 是 11 個 `[A-Za-z0-9_-]` 字元。`list=`、`t=`、`si=` 等參數丟掉，一律轉成 `https://www.youtube.com/watch?v=<ID>`（單一影片，不下載播放清單）。只有播放清單（`/playlist?list=`）、頻道（`/@名稱`、`/channel/`、`/c/`、`/user/`）或搜尋的連結 → 422「不支援播放清單或頻道，請貼單一影片的連結」；不是 YouTube 的連結 → 400「這不是 YouTube 影片連結」。前端用同一個解析函式（`shared/utils/youtube-url.ts`）即時提示。
 - 直播狀態（yt-dlp 的 `live_status`）：`not_live`（一般影片）與 `was_live`（直播重播）可以加入；`is_live`、`is_upcoming` → 422「還在直播中或還沒開始的直播不能加入，結束後再來」；`post_live`（剛結束、YouTube 還在處理重播）→ 422「直播剛結束，YouTube 還在處理重播，請過一段時間再加入」。還沒開始的直播與首播沒有可下載的格式，yt-dlp 實際上不會印出 `is_upcoming` 的影片資訊，而是用 YouTube 的說明失敗（`ERROR: … This live event will begin in 3 hours.`、`Premieres in 20 hours`），由錯誤對照表換成同一句 422。
 - 同一支 YouTube 影片（同一個 ID）不能重複加入：讀取資訊時回傳 `inLibraryVideoId`，介面顯示「這支影片已在影片庫」並連到那支影片；`POST /api/videos` 重複 → 409。連結的 ID 已在影片庫時，讀取資訊直接用影片庫裡存的資訊回答（不向 YouTube 讀取，`languageHint` 是 null），所以被 YouTube 暫時拒絕或影片後來改成私人時也會顯示「這支影片已在影片庫」。
 - 下載後的檔案只有一條音軌，所以 YouTube 影片不選音軌（`audioTrack` 一律 0，其他值 → 400）。語言依影片資訊的語言預選（`zh*` → 中文、`en*` → 英文，其他預設中文）。
@@ -150,32 +150,34 @@
 
 - YouTube 影片的 `full` 分析在 `probe` 前多一個 `download` 步驟：
   1. 影片資訊：30 分鐘內讀過就沿用，否則重新讀（`-J`）；再檢查一次直播狀態（同「加入」的規則，不符就失敗）。取得重播熱度與「有沒有聊天室重播」，更新影片的 YouTube 資訊。影片檔已經在時，讀取失敗（直播狀態不符除外）只寫進 log，照常繼續：聊天室要不要下載依影片庫裡存的 YouTube 資訊，重播熱度用 `signals.json` 裡上次的；影片檔要下載時讀取失敗就是這一步失敗。
-  2. 影片檔：已經下載過、檔案還在就沿用（log「沿用已下載的影片檔」）；不在（第一次分析，或檔案被刪掉）就下載。最高 1080p，偏好 H.264＋AAC（`-f "bv*+ba/b" -S "res:1080,vcodec:h264,acodec:aac" --merge-output-format mp4`）：瀏覽器能直接播、不用轉預覽，輸出剪輯也不用解 AV1；代價是檔案比 AV1／VP9 大約 2.5 倍（3 小時的 1080p 直播約 4–8 GB）。存成 `data/downloads/<videoId>.<ext>`，成功後寫入 `filePath`。
+  2. 影片檔：已經下載過、檔案還在就沿用（log「沿用已下載的影片檔」）；不在（第一次分析，或檔案被刪掉）就下載。最高 1080p，偏好 H.264＋AAC（`-f "bv*+ba/b" -S "res:1080,vcodec:h264,acodec:aac" --merge-output-format mp4`）：瀏覽器能直接播、不用轉預覽，輸出剪輯也不用解 AV1；代價是檔案比 AV1／VP9 大約 2.5 倍（3 小時的 1080p 直播約 4–8 GB）。影片與音訊分開下載，合併成暫存檔後才刪掉分開的檔案，所以下載時暫時需要約兩倍的空間。存成 `data/downloads/<videoId>.<ext>`，成功後寫入 `filePath`。
   3. 聊天室重播：影片資訊說有、而且 `data/downloads/<videoId>.live_chat.json` 還不存在時，另外跑一次 yt-dlp 下載（`--skip-download --write-subs --sub-langs live_chat`）。聊天室下載失敗只讓聊天室訊號 `missing`（附原因），分析照常繼續。yt-dlp 的聊天室下載不能續傳（會從頭附加在 `.part` 後面，訊息重複），所以每次開始前先刪掉 `<videoId>.live_chat.json.part`；只有最後的 `.json` 存在才算成功（yt-dlp 有些失敗仍回傳 0）。
-- 步驟內進度：影片資訊 3%、影片檔 85%、聊天室 12%。影片檔依 yt-dlp 的進度（影片與音訊分兩段下載：第一段佔 90%、第二段 10%；進度行看不出後面還有沒有第二段，所以只有一段時停在 90%，完成時跳到 100%；沒有總位元組時用 `fragment_index ÷ fragment_count`）；聊天室依已寫入最後一行的影片時間 ÷ 影片長度（每秒讀一次 `.part`）。
+- 步驟內進度：影片資訊 3%、影片檔 85%、聊天室 12%。影片檔依 yt-dlp 的進度（影片與音訊分兩段下載：第一段佔 90%、第二段 10%；進度行看不出後面還有沒有第二段，所以只有一段時停在 90%，完成時跳到 100%；第二段要等第一段回報完成（`finished`，已經下載過的那段也會回報）才算，因為第一段重試用完失敗時 yt-dlp 還是會先下載音訊才結束，進度不能因此跳到 90%；沒有總位元組時用 `fragment_index ÷ fragment_count`）；聊天室依已寫入最後一行的影片時間 ÷ 影片長度（每秒讀一次 `.part`）。
 - 進度權重：需要下載影片檔時 `download`（20%）→ `probe`（1%）→ `extract-audio`（4%）→ `transcribe`（48%）→ `prepare-preview`（7%）→ `signals`（18%）→ `candidates`（2%）；影片檔已經在時 `download`（2%）→ `probe`（2%）→ `extract-audio`（5%）→ `transcribe`（58%）→ `prepare-preview`（10%）→ `signals`（21%）→ `candidates`（2%）。
 - 中斷：程式中途關閉時，下次啟動照一般規則從頭重跑 `full`，yt-dlp 會從 `.part` 續傳；下載失敗後按「重試」也一樣續傳。中止工作（關閉程式或從影片庫移除）時結束整個 yt-dlp 行程樹（含 Deno／Node、ffmpeg 子行程）。沒有單獨的「取消下載」：要中途停止只能從影片庫移除，下載到一半的部分會一起刪掉。
 - 失敗可以按「重試」（`full`）。錯誤訊息把 yt-dlp 的英文 `ERROR:` 行換成中文（只看 `ERROR:` 開頭的行，`WARNING:` 只寫進 log）。stderr 只在換行（`\n`、`\r\n`）分行：yt-dlp 重試用完時印 `ERROR: \r[download] Got error: <原因>. Giving up after 10 retries`，中間的 `\r` 換成空白，原因才會留在 `ERROR:` 那一行（進度只印在 stdout）。依表格由上而下比對，用第一條符合的規則：
 
   | yt-dlp 訊息（不分大小寫） | 顯示 |
   | --- | --- |
-  | `Private video` | 這是私人影片，無法下載 |
+  | `Private video` | 這是私人影片，無法下載（自己的影片可以先在 YouTube Studio 改成「不公開」再加入） |
   | `members-only`、`Join this channel`、`subscriber_only` | 這是頻道會員限定影片，無法下載 |
   | `confirm your age`、`age-restricted`、`inappropriate` | 這支影片有年齡限制，需要登入才能下載，目前不支援 |
   | `not made this video available in your country`、`geo restrict` | 這支影片在你所在的地區無法觀看 |
   | `live stream recording is not available` | 這場直播沒有保留重播 |
   | `live event will begin`、`Premieres in`、`Premiere will begin`（還沒開始的直播與首播） | 還在直播中或還沒開始的直播不能加入，結束後再來 |
   | `ffmpeg is not installed`、`ffmpeg not found` | 找不到 FFmpeg，請重新執行 setup.bat |
+  | 硬碟滿了：`No space left on device`、`[Errno 28]`、`not enough space on the disk`、`WinError 112`、`磁碟空間不足`（下載中或合併影音時） | 硬碟空間不足，請清出空間後再按「重試」（下載會接著來；合併影音時暫時需要約兩倍的空間） |
   | `confirm you[’']re not a bot`、`HTTP Error 429`、`try again later`、`Your IP is likely being blocked` | YouTube 暫時拒絕這台電腦的連線（被當成機器人或請求太頻繁），請過一段時間再按「重試」 |
-  | `HTTP Error 403`、`Requested format is not available`、`Unable to extract`、`Signature extraction failed`、`nsig` | YouTube 可能改版了，yt-dlp 需要更新：關掉 gg-highlight 再重新開啟會自動更新，然後按「重試」 |
-  | 網路：`caused by TransportError`／`ProxyError`／`SSLError`／`CertificateVerifyError`／`IncompleteRead`、`getaddrinfo`、`name or service not known`、`nodename nor servname`、`temporary failure in name resolution`、`network is unreachable`、`timed out`、`connection refused`／`reset`／`aborted`、`remote end closed connection`、`N bytes read, M more expected`、`WinError 10051`／`10053`／`10054`／`10060`／`10061`／`10065` | 連不到 YouTube 或連線中斷，請確認網路連線後再試 |
+  | `HTTP Error 403`、`Requested format is not available`、`Unable to extract`、`Signature extraction failed`、`nsig` | YouTube 可能改版了，yt-dlp 需要更新：關掉 gg-highlight 的黑色命令列視窗、再雙擊 start.bat 會自動更新，然後按「重試」 |
+  | 網路：`caused by TransportError`／`ProxyError`／`SSLError`／`CertificateVerifyError`／`IncompleteRead`、`getaddrinfo`、`name or service not known`、`nodename nor servname`、`temporary failure in name resolution`、`network is unreachable`、`timed out`、`connection refused`／`reset`／`aborted`、`Connection broken:`、`remote end closed connection`、`Unable to connect to proxy`、`Tunnel connection failed`、`N bytes read, M more expected`、Windows 的錯誤碼 10051／10053／10054／10060／10061／10065（寫成 `[WinError 10054]`，或 `ConnectionResetError(10054, '<系統語言的說明>', None, 10054, None)` 這種形式） | 連不到 YouTube 或連線中斷，請確認網路連線後再試 |
   | `Video unavailable`、`has been removed`、`is not available` | 影片不存在或已被移除 |
   | 找不到 yt-dlp 執行檔 | 找不到 yt-dlp，請重新執行 setup.bat |
   | 其他 | 讀取影片資訊（`-J`）時「向 YouTube 讀取影片資訊失敗：`<原始 ERROR 行>`」；下載影片時「下載失敗：`<原始 ERROR 行>`」；下載聊天室時「聊天室重播下載失敗：`<原始 ERROR 行>`」（完整輸出寫進 log）|
 
+  下載重試用完時的 `ERROR:` 行只有例外本身的文字、沒有 `(caused by …)`：讀取途中連線被切斷是 urllib3 的 `Connection broken: …`（Windows 的錯誤碼只以上面的第二種形式出現，說明是系統語言），Proxy 拒絕連線是 `('Unable to connect to proxy', OSError('Tunnel connection failed: 502 Bad Gateway'))`。硬碟滿了排在 YouTube 那幾列前面：不管 YouTube 那邊怎樣，都要先清出空間。
   較明確的句子排在前面：「live stream recording is not available」與「Requested format is not available」不算「is not available」，YouTube 限流時的「This content isn't available, try again later」算暫時拒絕，「Unable to download webpage: HTTP Error 429／403」算暫時拒絕／可能改版、不算網路問題。有好幾行 `ERROR:` 時也是依表格順序：最上面那條規則只要符合其中任何一行就用它；「其他」用最後一行。yt-dlp 找不到 JavaScript 執行環境時只印 `WARNING:`（不對照）；每次執行都加 `--js-runtimes node:<伺服器的 node>`（Node 22.13 以上），實際上不會發生。
   分析失敗時存成「下載影片失敗：<顯示>」（「其他」去掉「下載失敗：」，是「下載影片失敗：<原始 ERROR 行>」）；直播狀態不符（直播中、還沒開始、剛結束、不是單一影片）的訊息照原樣顯示，不加前綴。讀取影片資訊最多等 90 秒，逾時是「向 YouTube 讀取影片資訊逾時，請稍後再試」。
-  「可能改版了」與「其他」兩種情況會讓下次啟動一定檢查 yt-dlp 更新（刪掉檢查紀錄，見「啟動」）；網路問題、還沒開始的直播等其他情況不會。
+  「可能改版了」與「其他」兩種情況會讓下次啟動一定檢查 yt-dlp 更新（刪掉檢查紀錄，見「啟動」）；網路問題、硬碟空間不足、還沒開始的直播等其他情況不會。
 - 「只重新找精華片段」不下載影片檔；它在 `signals` 步驟開頭重新讀一次影片資訊（只拿重播熱度，最多等 90 秒，不用 30 分鐘的暫存；失敗就用 `signals.json` 裡上次的重播熱度，寫進 log），聊天室檔案不存在而影片資訊說有聊天室重播時也再下載一次（之前聊天室下載失敗的補救方法）。這時 `signals` 步驟內進度：YouTube 資料 10%、音量 10%、AI 讀逐字稿 80%。
 
 #### 聊天室密度（`chat` 訊號）
@@ -257,7 +259,7 @@ tests/                   測試素材產生器、整合測試、e2e
 
 - 程式自己管理一份，裝在專案的 `tools/`（不進 git）：`UV_TOOL_DIR=tools/uv`、`UV_TOOL_BIN_DIR=tools/bin`，`uv tool install "yt-dlp[default,deno]"`。`default` 帶入解 YouTube 驗證需要的 `yt-dlp-ejs`，`deno` 帶入沙盒化的 Deno 當 JavaScript 執行環境；另外一律加 `--js-runtimes node:<伺服器的 node 執行檔>` 當備援（yt-dlp 會優先用 Deno）。
 - 安裝與更新都在 `scripts/ytdlp.mjs`：setup.bat 呼叫它安裝，`start.mjs` 在伺服器啟動前呼叫它（見「啟動」），所以伺服器執行中不會有檔案被換掉。檢查紀錄是 `tools/.yt-dlp-checked`（內容是時間）；伺服器遇到「可能改版了」或不明的 yt-dlp 錯誤時刪掉它，下次啟動就一定檢查更新。更新用 stable 版；壞掉時的 nightly 指令寫在 README。
-- 安裝後，以及伺服器要求的檢查（檢查紀錄被刪掉）更新後，執行一次 `yt-dlp --version`（最多等 30 秒）確認能執行。uv 的工具環境記的是絕對路徑，專案資料夾搬過位置或它用的 Python 被移除時 yt-dlp 就不能執行，`uv tool upgrade` 卻回「Nothing to upgrade」；所以不能執行時 `uv tool install --reinstall "yt-dlp[default,deno]"` 重裝一次再確認，還是不行就警告（請使用者刪掉 `tools` 資料夾再啟動），不寫檢查紀錄，下次啟動再試。
+- 安裝後，以及伺服器要求的檢查（檢查紀錄被刪掉）更新後，執行一次 `yt-dlp --version`（最多等 30 秒）確認能執行。uv 的工具環境記的是絕對路徑，專案資料夾搬過位置或它用的 Python 被移除時 yt-dlp 就不能執行，`uv tool upgrade` 卻回「Nothing to upgrade」；所以不能執行時 `uv tool install --reinstall --force "yt-dlp[default,deno]"` 重裝一次再確認，還是不行就警告（請使用者刪掉 `tools` 資料夾再啟動），不寫檢查紀錄，下次啟動再試。安裝與重裝都加 `--force`（`tools/bin/` 是程式自己的，覆蓋裡面的執行檔沒有問題）：Windows 上 `tools\bin\yt-dlp.exe` 是複製的檔案、不是捷徑，資料夾搬過位置後 uv 的紀錄還寫著舊位置，不會先刪掉新位置的那一份；沒有 `--force` 時 uv 會以「Executable already exists」失敗，還把剛建好的工具環境刪掉。
 - 每次執行都加 `--no-config --no-playlist --no-update`；`--ffmpeg-location` 只在 `GG_FFMPEG` 是存在的絕對路徑時才加（給 `ffmpeg` 這種名稱會讓 yt-dlp 找不到 ffmpeg 而直接失敗）。用參數陣列執行（不經過 shell）、`windowsHide`、`PYTHONUTF8=1`；結束時連子行程（Deno／Node、ffmpeg）一起結束（Windows 用 `taskkill /T /F`）。
 - 下載用 `--newline --progress --progress-delta 1 --progress-template "download:GGDL %(info.format_id)s %(progress.{status,downloaded_bytes,total_bytes,total_bytes_estimate,fragment_index,fragment_count})j" --print "after_move:GGFILE %(filepath)j"`；stdout 與 stderr 都要讀。成功 = 結束碼 0 而且有 `GGFILE` 那一行，且檔案存在、在 `data/downloads/` 裡。
 - 設定了 `GG_YTDLP_CMD` 就用它（測試用假的 yt-dlp），不自動安裝或更新。

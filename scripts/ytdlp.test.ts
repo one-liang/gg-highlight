@@ -130,7 +130,9 @@ describe('paths and environment', () => {
   })
 
   it('installs the requirement with the default and deno extras, and upgrades by name', () => {
-    expect(INSTALL_ARGS).toEqual(['tool', 'install', '--upgrade', 'yt-dlp[default,deno]'])
+    // --force: tools/bin belongs to the app, an executable uv has no record of there is overwritten.
+    expect(INSTALL_ARGS).toEqual(['tool', 'install', '--upgrade', '--force', 'yt-dlp[default,deno]'])
+    expect(REINSTALL_ARGS).toEqual(['tool', 'install', '--reinstall', '--force', 'yt-dlp[default,deno]'])
     expect(UPGRADE_ARGS).toEqual(['tool', 'upgrade', 'yt-dlp'])
   })
 })
@@ -201,7 +203,7 @@ describe('ensure', () => {
     const [call] = uv.calls
     expect(call.command).toBe('uv')
     expect(call.args).toEqual(INSTALL_ARGS)
-    expect(call.opts).toMatchObject({ cwd: tmp, timeoutMs: 180_000 })
+    expect(call.opts).toMatchObject({ cwd: tmp, timeoutMs: 600_000 })
     expect(call.opts.env).toMatchObject({ UV_TOOL_DIR: paths().uvToolDir, UV_TOOL_BIN_DIR: paths().binDir })
     expect(await readStamp(paths().stamp)).toBe(NOW)
     expect(await fs.readFile(paths().stamp, 'utf8')).toBe('2026-11-10T12:00:00.000Z\n')
@@ -249,7 +251,6 @@ describe('ensure', () => {
     const { options, lines } = opts(uv.run)
     expect(await ensure(options)).toEqual({ ok: true, action: 'upgraded', message: '已重新安裝 yt-dlp（原本的無法執行，例如專案資料夾搬過位置）' })
     expect(uv.calls.map(c => c.args)).toEqual([UPGRADE_ARGS, REINSTALL_ARGS])
-    expect(REINSTALL_ARGS).toEqual(['tool', 'install', '--reinstall', 'yt-dlp[default,deno]'])
     expect(uv.calls[1]!.opts.env).toMatchObject({ UV_TOOL_DIR: paths().uvToolDir, UV_TOOL_BIN_DIR: paths().binDir })
     expect(uv.checks).toHaveLength(2)
     expect(lines).toContain('▶ yt-dlp 無法執行（exec: /old/place/tools/uv/yt-dlp/bin/python: not found），重新安裝…')
@@ -338,6 +339,100 @@ describe('ensure', () => {
   })
 })
 
+/**
+ * A fake uv that keeps uv's state on disk the way uv 0.11 does on Windows: UV_TOOL_DIR/yt-dlp holds the
+ * environment (here just its python) and the receipt, which names the executable by its absolute path;
+ * UV_TOOL_BIN_DIR/yt-dlp is a copy (not a symlink) that runs the environment's python by its absolute
+ * path, so `--version` fails once that python is gone. `tool install` removes the executable the receipt
+ * names and builds the environment; then, without --force, a file still at the target fails the install
+ * with "Executable already exists" and removes that environment (uv's finalize_tool_install).
+ * `tool upgrade` needs the receipt.
+ */
+function diskUv() {
+  const calls: string[][] = []
+  const run = async (command: string, args: string[], callOpts: Call['opts']): Promise<RunResult> => {
+    if (command !== 'uv') {
+      const python = await fs.readFile(command, 'utf8').catch(() => null)
+      if (python === null) return { ...failed('', 1), notFound: true }
+      return existsSync(python) ? ok('2026.10.26\n') : failed(`exec: ${python}: not found`, 127)
+    }
+    calls.push(args)
+    const envDir = path.join(callOpts.env!.UV_TOOL_DIR!, 'yt-dlp')
+    const receiptFile = path.join(envDir, 'uv-receipt.json')
+    const receipt = await fs.readFile(receiptFile, 'utf8').then(text => JSON.parse(text) as { installPath: string }, () => null)
+    if (args[1] === 'upgrade') {
+      if (!receipt) return failed('error: Failed to upgrade yt-dlp\n  Caused by: `yt-dlp` is not installed; run `uv tool install yt-dlp` to install', 1)
+      return ok('', 'Nothing to upgrade\n')
+    }
+    if (receipt) await fs.rm(receipt.installPath, { force: true })
+    const python = path.join(envDir, 'bin', 'python')
+    await fs.rm(envDir, { recursive: true, force: true })
+    await fs.mkdir(path.dirname(python), { recursive: true })
+    await fs.writeFile(python, '')
+    const exe = path.join(callOpts.env!.UV_TOOL_BIN_DIR!, 'yt-dlp')
+    if (!args.includes('--force') && existsSync(exe)) {
+      await fs.rm(envDir, { recursive: true, force: true })
+      return failed('error: Executable already exists: yt-dlp (use `--force` to overwrite)')
+    }
+    await fs.mkdir(path.dirname(exe), { recursive: true })
+    await fs.writeFile(exe, python)
+    await fs.writeFile(receiptFile, JSON.stringify({ installPath: exe }))
+    return ok('', INSTALL_OUTPUT)
+  }
+  return { run, calls }
+}
+
+describe('a moved project folder on Windows (tools/bin/yt-dlp.exe is a copy the receipt no longer names)', () => {
+  /** Installs into <tmp>/<from>, then moves the project folder to <tmp>/<to>. */
+  async function installAndMove(from: string, to: string) {
+    const before = path.join(tmp, from)
+    expect(await install(opts(diskUv().run, { root: before }).options)).toMatchObject({ ok: true, message: '已安裝 yt-dlp 2026.10.26' })
+    const root = path.join(tmp, to)
+    await fs.rename(before, root)
+    return { root, p: ytdlpPaths(root, 'linux') }
+  }
+
+  it('the fake behaves like uv: the reinstall without --force fails and removes the environment', async () => {
+    const { root, p } = await installAndMove('a', 'b')
+    const uv = diskUv()
+    const r = await uv.run('uv', ['tool', 'install', '--reinstall', 'yt-dlp[default,deno]'], { env: uvEnv(root, {}, 'linux') })
+    expect(r).toMatchObject({ ok: false, stderr: expect.stringContaining('Executable already exists') })
+    expect(existsSync(path.join(p.uvToolDir, 'yt-dlp'))).toBe(false)
+    expect(existsSync(p.exe)).toBe(true)
+  })
+
+  it('start.bat repairs it after the server asked for a check: the reinstall overwrites the copy', async () => {
+    const { root, p } = await installAndMove('a', 'b')
+    await fs.rm(p.stamp)
+    const uv = diskUv()
+    const { options, lines } = opts(uv.run, { root })
+    expect(await ensure(options)).toEqual({ ok: true, action: 'upgraded', message: '已重新安裝 yt-dlp（原本的無法執行，例如專案資料夾搬過位置）' })
+    expect(uv.calls).toEqual([UPGRADE_ARGS, REINSTALL_ARGS])
+    expect(lines).toContain(`▶ yt-dlp 無法執行（exec: ${path.join(tmp, 'a', 'tools', 'uv', 'yt-dlp', 'bin', 'python')}: not found），重新安裝…`)
+    expect(await uv.run(p.exe, ['--version'], {})).toMatchObject({ ok: true })
+    expect(JSON.parse(await fs.readFile(path.join(p.uvToolDir, 'yt-dlp', 'uv-receipt.json'), 'utf8'))).toEqual({ installPath: p.exe })
+    expect(await readStamp(p.stamp)).toBe(NOW)
+  })
+
+  it('recovers when only the executable is left (an earlier failed repair let uv remove the environment)', async () => {
+    const { root, p } = await installAndMove('a', 'b')
+    await fs.rm(p.uvToolDir, { recursive: true })
+    await fs.rm(p.stamp)
+    const uv = diskUv()
+    expect(await ensure(opts(uv.run, { root }).options)).toEqual({ ok: true, action: 'installed', message: '已安裝 yt-dlp 2026.10.26' })
+    expect(uv.calls).toEqual([UPGRADE_ARGS, INSTALL_ARGS])
+    expect(await uv.run(p.exe, ['--version'], {})).toMatchObject({ ok: true })
+  })
+
+  it('setup.bat repairs it too', async () => {
+    const { root, p } = await installAndMove('a', 'b')
+    const uv = diskUv()
+    expect(await install(opts(uv.run, { root }).options)).toEqual({ ok: true, action: 'installed', message: '已安裝 yt-dlp 2026.10.26' })
+    expect(uv.calls).toEqual([INSTALL_ARGS])
+    expect(await uv.run(p.exe, ['--version'], {})).toMatchObject({ ok: true })
+  })
+})
+
 describe('install (setup.bat)', () => {
   it('runs uv tool install --upgrade even when yt-dlp is already there', async () => {
     await putExe()
@@ -383,7 +478,7 @@ describe('install (setup.bat)', () => {
   it('returns a failure instead of throwing', async () => {
     const uv = fakeUv([timedOut])
     const { options } = opts(uv.run)
-    expect(await install(options)).toMatchObject({ ok: false, action: 'failed', message: expect.stringMatching(/^無法安裝 yt-dlp（只影響 YouTube）：uv 超過 180 秒/) })
+    expect(await install(options)).toMatchObject({ ok: false, action: 'failed', message: expect.stringMatching(/^無法安裝 yt-dlp（只影響 YouTube）：uv 超過 600 秒/) })
   })
 })
 

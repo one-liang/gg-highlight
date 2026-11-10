@@ -11,6 +11,8 @@ import type { MediaTools } from '../../media'
 
 export const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..')
 export const FAKE_TRANSCRIBER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fake-transcriber.mjs')
+/** The fake yt-dlp (server/lib/youtube/test-helpers), so no job test reaches the repo's tools/ (a real yt-dlp, its update stamp). */
+const FAKE_YTDLP = path.join(ROOT_DIR, 'server', 'lib', 'youtube', 'test-helpers', 'fake-yt-dlp.mjs')
 
 const SYSTEM_NOTO = '/usr/share/fonts/opentype/noto'
 
@@ -47,7 +49,14 @@ export async function createJobTestEnv(): Promise<JobTestEnv> {
   const dataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'gg-jobs-'))
   const config: AppConfig = {
     // Ollama off unless a test points config.ollama at the fake server: never a developer's real Ollama.
-    ...loadConfig({ GG_DATA_DIR: dataDir, GG_VIDEO_ENCODER: 'libx264', GG_ASR_DEVICE: 'cpu', GG_OLLAMA_URL: 'off' }, ROOT_DIR),
+    // yt-dlp: the fake one (tests that download inject their own with a scenario), never tools/ of the repo.
+    ...loadConfig({
+      GG_DATA_DIR: dataDir,
+      GG_VIDEO_ENCODER: 'libx264',
+      GG_ASR_DEVICE: 'cpu',
+      GG_OLLAMA_URL: 'off',
+      GG_YTDLP_CMD: JSON.stringify([process.execPath, FAKE_YTDLP]),
+    }, ROOT_DIR),
     fontsDir: testFontsDir(),
     asrModels: { zh: 'test/zh-model', en: 'test/en-model' },
   }

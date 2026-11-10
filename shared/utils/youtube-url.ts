@@ -19,6 +19,8 @@ const YOUTUBE_HOSTS = new Set([
   'www.youtube-nocookie.com',
 ])
 const SHORT_HOSTS = new Set(['youtu.be', 'www.youtu.be'])
+/** YouTube Studio: the address bar of a video's pages there reads /video/<id>/edit (or /livestreaming, /analytics/…). */
+const STUDIO_HOST = 'studio.youtube.com'
 /** Path prefixes whose next segment is the video id. */
 const ID_PATHS = new Set(['live', 'shorts', 'embed', 'v'])
 /** Channel pages (besides /@name). */
@@ -63,7 +65,8 @@ function parseUrl(input: string): URL | null {
 
 /**
  * Accepts youtube.com/watch?v=, youtu.be/, /live/, /shorts/, /embed/, /v/ on www., m., music. and
- * youtube-nocookie.com, with or without scheme, surrounding whitespace allowed. Drops list=, t=, si=…
+ * youtube-nocookie.com, and YouTube Studio's studio.youtube.com/video/<id>/…, with or without scheme,
+ * surrounding whitespace allowed. Drops list=, t=, si=…
  * (a watch URL with list= is still the single video). Playlist-only, channel (/@name, /channel/, /c/,
  * /user/) and search (/results) links → playlist-or-channel. Anything else → not-youtube.
  */
@@ -74,6 +77,7 @@ export function parseYoutubeUrl(input: string): YoutubeUrlResult {
   const segments = url.pathname.split('/').filter(Boolean)
 
   if (SHORT_HOSTS.has(host)) return video(segments[0])
+  if (host === STUDIO_HOST) return segments[0]?.toLowerCase() === 'video' ? video(segments[1]) : notYoutube()
   if (!YOUTUBE_HOSTS.has(host)) return notYoutube()
 
   const first = (segments[0] ?? '').toLowerCase()

@@ -119,7 +119,7 @@ describe('fetchMetadata', () => {
   it.each([
     [IDS.liveNow, 'live', '還在直播中或還沒開始的直播不能加入，結束後再來'],
     [IDS.postLive, 'post-live', '直播剛結束，YouTube 還在處理重播，請過一段時間再加入'],
-    [IDS.private, 'private', '這是私人影片，無法下載'],
+    [IDS.private, 'private', '這是私人影片，無法下載（自己的影片可以先在 YouTube Studio 改成「不公開」再加入）'],
     [IDS.botCheck, 'blocked', 'YouTube 暫時拒絕這台電腦的連線（被當成機器人或請求太頻繁），請過一段時間再按「重試」'],
     // A stream that has not started: yt-dlp prints no -J document, only YouTube's reason.
     [IDS.upcoming, 'live', '還在直播中或還沒開始的直播不能加入，結束後再來'],

@@ -473,7 +473,7 @@ describe.skipIf(process.platform === 'win32')('main (fake project)', () => {
     expect(out.indexOf('已安裝 yt-dlp')).toBeLessThan(out.indexOf('啟動伺服器'))
     first.child.kill('SIGTERM')
     expect(await first.exit).toBe(0)
-    expect(await calls()).toEqual([`tool install --upgrade yt-dlp[default,deno]|${toolsEnv}`])
+    expect(await calls()).toEqual([`tool install --upgrade --force yt-dlp[default,deno]|${toolsEnv}`])
     expect(existsSync(path.join(tmp, 'tools', '.yt-dlp-checked'))).toBe(true)
 
     // checked less than a day ago: uv is not run, nothing is printed
