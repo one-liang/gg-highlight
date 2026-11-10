@@ -1,0 +1,21 @@
+# pnpm settings for this project (pnpm 11 and later no longer read the "pnpm" field of package.json).
+
+# A single package. pnpm 9 and 10.0–10.4 refuse a pnpm-workspace.yaml without "packages".
+packages:
+  - '.'
+
+# Dependencies allowed to run their install scripts. Read by pnpm 10.26+, 11 and 12. pnpm 11 and later
+# fail the install (ERR_PNPM_IGNORED_BUILDS) when a dependency with an install script is not listed
+# here; pnpm 10 only warns.
+allowBuilds:
+  esbuild: true
+  vue-demi: true
+  '@parcel/watcher': true
+  '@tailwindcss/oxide': true
+
+# The same list for pnpm 10.5–10.25. pnpm 11 and later ignore this key. Keep both lists in sync.
+onlyBuiltDependencies:
+  - esbuild
+  - vue-demi
+  - '@parcel/watcher'
+  - '@tailwindcss/oxide'

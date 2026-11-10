@@ -1,0 +1,10 @@
+@echo off
+chcp 65001 >nul
+cd /d "%~dp0"
+
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\setup.ps1" %*
+set "GG_SETUP_EXIT=%ERRORLEVEL%"
+
+echo.
+pause
+exit /b %GG_SETUP_EXIT%

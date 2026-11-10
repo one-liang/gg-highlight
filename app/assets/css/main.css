@@ -1,0 +1,22 @@
+@import "tailwindcss";
+@import "@nuxt/ui";
+
+@theme {
+  --font-sans: system-ui, -apple-system, "Segoe UI", "Microsoft JhengHei", "PingFang TC", "Noto Sans CJK TC", "Noto Sans TC", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Consolas", "SFMono-Regular", "Menlo", monospace;
+}
+
+/* Dismissed highlights on the timeline: faint diagonal stripes. */
+.tl-striped {
+  background-image: repeating-linear-gradient(
+    135deg,
+    color-mix(in oklab, var(--ui-text-dimmed) 45%, transparent) 0 2px,
+    transparent 2px 6px
+  );
+}
+
+/* Long transcripts: let the browser skip layout/paint for rows far off screen. */
+.transcript-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 52px;
+}

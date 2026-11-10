@@ -1,0 +1,33 @@
+# Line endings. Git stores text with LF and converts on checkout where a file type needs it.
+* text=auto
+
+# Windows entry points: cmd.exe and Windows PowerShell 5.1 need CRLF, whatever core.autocrlf says.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+# Shell scripts break with CRLF.
+*.sh text eol=lf
+
+# Binary: media, fonts, images, databases. Never converted or diffed as text.
+# (No *.ts here: that is TypeScript in this repo, not MPEG-TS.)
+*.mp4 binary
+*.mkv binary
+*.mov binary
+*.webm binary
+*.m4v binary
+*.wav binary
+*.mp3 binary
+*.aac binary
+*.otf binary
+*.ttf binary
+*.ttc binary
+*.woff binary
+*.woff2 binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.db binary
+*.sqlite binary
