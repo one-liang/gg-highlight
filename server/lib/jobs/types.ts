@@ -1,6 +1,9 @@
 import type { AppConfig } from '../config'
 import type { Repositories } from '../db'
 import type { MediaTools } from '../media'
+import { createMetadataCache, type MetadataCache } from '../youtube/cache'
+import { createYoutubeTools, ytdlpConfigFrom } from '../youtube/tools'
+import type { YoutubeTools } from '../youtube/types'
 
 /** Everything a job needs, injected so the queues can run against test doubles. */
 export interface JobDeps {
@@ -16,9 +19,15 @@ export interface JobDeps {
   progressIntervalMs?: number
   /** HTTP client for Ollama (config.ollama); tests may inject one. Defaults to globalThis.fetch. */
   fetch?: typeof fetch
+  /** yt-dlp operations (default: config.ytdlpCommand); tests inject the fake yt-dlp. */
+  youtube: YoutubeTools
+  /** Metadata reads of the last 30 minutes, shared with the API routes (POST /api/youtube/probe). */
+  metadataCache: MetadataCache
 }
 
-export type JobDepsInput = Omit<JobDeps, 'transcriberCommand' | 'now' | 'log'> & Partial<Pick<JobDeps, 'transcriberCommand' | 'now' | 'log'>>
+type Defaulted = 'transcriberCommand' | 'now' | 'log' | 'youtube' | 'metadataCache'
+
+export type JobDepsInput = Omit<JobDeps, Defaulted> & Partial<Pick<JobDeps, Defaulted>>
 
 export function resolveDeps(input: JobDepsInput): JobDeps {
   return {
@@ -26,6 +35,8 @@ export function resolveDeps(input: JobDepsInput): JobDeps {
     transcriberCommand: input.transcriberCommand ?? input.config.transcriberCommand,
     now: input.now ?? Date.now,
     log: input.log ?? (message => console.log(message)),
+    youtube: input.youtube ?? createYoutubeTools(ytdlpConfigFrom(input.config)),
+    metadataCache: input.metadataCache ?? createMetadataCache(),
   }
 }
 

@@ -44,6 +44,7 @@ function addAnalysedVideo(filePath = fx.sampleEnMkv, media: MediaInfo | null = s
     sourceKind: 'watch-folder',
     filePath,
     youtubeUrl: null,
+    youtube: null,
     language: 'en',
     audioTrack: 1,
     media,

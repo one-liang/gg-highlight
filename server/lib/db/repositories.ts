@@ -1,9 +1,11 @@
 // Repositories: SQL rows <-> domain objects. Ids are random UUIDs, timestamps ISO strings.
 import { randomUUID } from 'node:crypto'
 import type { SQLInputValue } from 'node:sqlite'
+import { z } from 'zod'
 import type {
   AnalysisMode, AnalysisState, AnalysisStatus, AnalysisStep, Clip, ClipStatus, Highlight, HighlightOrigin,
   HighlightStatus, Language, Layout, MediaInfo, Settings, SignalKind, SignalState, SourceKind, TranscriptSegment,
+  YoutubeMeta,
 } from '../../../shared/types/domain'
 import { transaction } from './schema'
 import type { ClipRecord, Db, Repositories, VideoRecord } from './types'
@@ -16,6 +18,8 @@ interface VideoRow {
   source_kind: SourceKind
   file_path: string | null
   youtube_url: string | null
+  youtube_id: string | null
+  youtube_json: string | null
   language: Language
   audio_track: number
   media_json: string | null
@@ -110,6 +114,38 @@ function parseSignals(json: string | null): SignalState[] | null {
   }
 }
 
+const youtubeMetaSchema = z.object({
+  id: z.string().regex(/^[A-Za-z0-9_-]{11}$/),
+  channel: z.string().nullable(),
+  durationSec: z.number().nonnegative().nullable(),
+  liveStatus: z.enum(['not_live', 'was_live', 'post_live', 'is_live', 'is_upcoming']).nullable(),
+  uploadDate: z.string().nullable(),
+  chatAvailable: z.boolean(),
+  heatmapAvailable: z.boolean(),
+})
+
+// Compile-time check that the schema produces YoutubeMeta.
+type Assert<T extends true> = T
+type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false
+export type _YoutubeMetaMatches = Assert<Same<z.infer<typeof youtubeMetaSchema>, YoutubeMeta>>
+
+/** Stored YoutubeMeta; null when absent or not valid. */
+function parseYoutube(json: string | null): YoutubeMeta | null {
+  if (!json) return null
+  try {
+    const parsed = youtubeMetaSchema.safeParse(JSON.parse(json))
+    return parsed.success ? parsed.data : null
+  }
+  catch {
+    return null
+  }
+}
+
+/** videos.youtube_json and videos.youtube_id of a YoutubeMeta (both null for local files). */
+function youtubeColumns(youtube: YoutubeMeta | null): { youtube_json: string | null, youtube_id: string | null } {
+  return { youtube_json: youtube ? JSON.stringify(youtube) : null, youtube_id: youtube?.id ?? null }
+}
+
 function toVideo(row: VideoRow): VideoRecord {
   return {
     id: row.id,
@@ -117,6 +153,7 @@ function toVideo(row: VideoRow): VideoRecord {
     sourceKind: row.source_kind,
     filePath: row.file_path,
     youtubeUrl: row.youtube_url,
+    youtube: parseYoutube(row.youtube_json),
     language: row.language,
     audioTrack: row.audio_track,
     media: parseMedia(row.media_json),
@@ -235,13 +272,14 @@ export function createRepositories(db: Db): Repositories {
     insert(video) {
       const id = randomUUID()
       const ts = now()
+      const youtube = youtubeColumns(video.youtube)
       db.prepare(`
         INSERT INTO videos (
-          id, title, source_kind, file_path, youtube_url, language, audio_track, media_json,
+          id, title, source_kind, file_path, youtube_url, youtube_id, youtube_json, language, audio_track, media_json,
           preview_path, analysis_status, analysis_step, analysis_progress, analysis_error,
           analysis_queued_at, analysis_started_at, analysis_finished_at, created_at
         ) VALUES (
-          :id, :title, :sourceKind, :filePath, :youtubeUrl, :language, :audioTrack, :media,
+          :id, :title, :sourceKind, :filePath, :youtubeUrl, :youtubeId, :youtubeJson, :language, :audioTrack, :media,
           NULL, 'queued', NULL, 0, NULL, :ts, NULL, NULL, :ts
         )
       `).run({
@@ -250,6 +288,8 @@ export function createRepositories(db: Db): Repositories {
         sourceKind: video.sourceKind,
         filePath: video.filePath,
         youtubeUrl: video.youtubeUrl,
+        youtubeId: youtube.youtube_id,
+        youtubeJson: youtube.youtube_json,
         language: video.language,
         audioTrack: video.audioTrack,
         media: video.media ? JSON.stringify(video.media) : null,
@@ -272,12 +312,19 @@ export function createRepositories(db: Db): Repositories {
       return row ? toVideo(row) : null
     },
 
+    findByYoutubeId(youtubeId) {
+      const row = db.prepare('SELECT * FROM videos WHERE youtube_id = ? ORDER BY created_at, rowid LIMIT 1')
+        .get(youtubeId) as VideoRow | undefined
+      return row ? toVideo(row) : null
+    },
+
     update(id, patch) {
       const columns: Row = {}
       if (patch.title !== undefined) columns.title = patch.title
       if (patch.filePath !== undefined) columns.file_path = patch.filePath
       if (patch.media !== undefined) columns.media_json = patch.media ? JSON.stringify(patch.media) : null
       if (patch.previewPath !== undefined) columns.preview_path = patch.previewPath
+      if (patch.youtube !== undefined) Object.assign(columns, youtubeColumns(patch.youtube))
       if (!updateById(db, 'videos', id, columns)) return null
       return getVideo(id)
     },

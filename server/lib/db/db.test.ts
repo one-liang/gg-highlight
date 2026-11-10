@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DatabaseSync } from 'node:sqlite'
-import type { Highlight, HighlightOrigin, HighlightStatus, MediaInfo, SignalState } from '../../../shared/types/domain'
+import type { Highlight, HighlightOrigin, HighlightStatus, MediaInfo, SignalState, YoutubeMeta } from '../../../shared/types/domain'
 import {
   createRepositories, isKeptOnReanalysis, MIGRATIONS, migrate, openDatabase, schemaVersion, toClip,
   type ClipRecord, type Db, type NewVideo, type Repositories,
@@ -26,12 +26,23 @@ const media: MediaInfo = {
   ],
 }
 
+const youtube: YoutubeMeta = {
+  id: 'dQw4w9WgXcQ',
+  channel: '測試頻道',
+  durationSec: 10_800.5,
+  liveStatus: 'was_live',
+  uploadDate: '2026-10-01',
+  chatAvailable: true,
+  heatmapAvailable: false,
+}
+
 function newVideo(overrides: Partial<NewVideo> = {}): NewVideo {
   return {
     title: '測試影片',
     sourceKind: 'watch-folder',
     filePath: path.join(os.tmpdir(), 'rec', 'a.mkv'),
     youtubeUrl: null,
+    youtube: null,
     language: 'zh',
     audioTrack: 1,
     media,
@@ -150,6 +161,55 @@ describe('migration 2 (milestone 2 analysis fields)', () => {
   })
 })
 
+describe('migration 3 (milestone 3 YouTube metadata)', () => {
+  /** A milestone 2 database (schema version 2) with a done video that has highlights, clips and signals. */
+  function milestone2Db(): Db {
+    const old = new DatabaseSync(':memory:')
+    old.exec('PRAGMA foreign_keys = ON')
+    migrate(old, MIGRATIONS.filter(m => m.version <= 2))
+    const ts = '2026-01-01T00:00:00.000Z'
+    const signals = JSON.stringify([{ kind: 'loudness', status: 'used', reason: null }])
+    old.exec(`
+      INSERT INTO videos (id, title, source_kind, file_path, language, analysis_status, analysis_version, analysis_signals_json, created_at)
+        VALUES ('done', 'd', 'watch-folder', '/rec/d.mkv', 'zh', 'done', 2, '${signals}', '${ts}'),
+               ('yt', 'y', 'youtube', NULL, 'zh', 'queued', NULL, NULL, '${ts}');
+      UPDATE videos SET youtube_url = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' WHERE id = 'yt';
+      INSERT INTO transcript_segments VALUES ('done', 0, 0, 1, '改過', '原文');
+      INSERT INTO highlights VALUES ('h1', 'done', 1, 5, 'selected', 'manual', NULL, NULL, '${ts}', '${ts}');
+      INSERT INTO clips (id, video_id, highlight_id, "start", "end", layout, burn_subtitles, status, created_at)
+        VALUES ('c1', 'done', 'h1', 1, 5, 'original', 1, 'done', '${ts}');
+    `)
+    return old
+  }
+
+  it('adds the YouTube columns (null for existing videos) without touching anything else', () => {
+    const old = milestone2Db()
+    try {
+      expect(schemaVersion(old)).toBe(2)
+      expect(migrate(old)).toBe(LATEST)
+      const r = createRepositories(old)
+      expect(r.videos.get('done')).toMatchObject({ youtube: null, youtubeUrl: null, filePath: '/rec/d.mkv' })
+      expect(r.videos.get('done')!.analysis).toMatchObject({
+        status: 'done', version: 2, signals: [{ kind: 'loudness', status: 'used', reason: null }],
+      })
+      expect(r.videos.get('yt')).toMatchObject({ youtube: null, youtubeUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' })
+      expect(r.videos.findByYoutubeId('dQw4w9WgXcQ')).toBeNull()
+      expect(r.highlights.listByVideo('done').map(h => h.id)).toEqual(['h1'])
+      expect(r.clips.get('c1')).toMatchObject({ highlightId: 'h1', status: 'done' })
+      expect(r.transcript.list('done')).toEqual([{ idx: 0, start: 0, end: 1, text: '改過', edited: true }])
+
+      // The migrated database works like a fresh one.
+      expect(r.videos.update('yt', { youtube })).toMatchObject({ youtube })
+      expect(r.videos.findByYoutubeId(youtube.id)?.id).toBe('yt')
+      const index = old.prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'videos_youtube_id'`).get()
+      expect(index).toEqual({ name: 'videos_youtube_id' })
+    }
+    finally {
+      old.close()
+    }
+  })
+})
+
 describe('videos', () => {
   it('inserts with queued analysis and round-trips every field', () => {
     at('2026-01-01T00:00:00.000Z')
@@ -175,6 +235,68 @@ describe('videos', () => {
     expect(video.media).toBeNull()
     expect(video.filePath).toBeNull()
     expect(video.youtubeUrl).toBe('https://youtu.be/x')
+    expect(video.youtube).toBeNull()
+    expect(repos.videos.insert(newVideo()).youtube).toBeNull()
+  })
+
+  it('round-trips YouTube metadata and finds videos by YouTube id', () => {
+    const url = `https://www.youtube.com/watch?v=${youtube.id}`
+    const video = repos.videos.insert(newVideo({ sourceKind: 'youtube', filePath: null, youtubeUrl: url, youtube, media: null }))
+    expect(video).toMatchObject({ sourceKind: 'youtube', filePath: null, youtubeUrl: url, youtube, media: null })
+    expect(repos.videos.get(video.id)).toEqual(video)
+    const row = db.prepare('SELECT youtube_id FROM videos WHERE id = ?').get(video.id) as { youtube_id: string }
+    expect(row.youtube_id).toBe(youtube.id)
+
+    repos.videos.insert(newVideo())
+    expect(repos.videos.findByYoutubeId(youtube.id)?.id).toBe(video.id)
+    // YouTube ids are case-sensitive.
+    expect(repos.videos.findByYoutubeId(youtube.id.toLowerCase())).toBeNull()
+    expect(repos.videos.findByYoutubeId('aaaaaaaaaaa')).toBeNull()
+  })
+
+  it('finds the oldest video when the same YouTube id was stored twice', () => {
+    at('2026-01-01T00:00:00.000Z')
+    const first = repos.videos.insert(newVideo({ sourceKind: 'youtube', filePath: null, youtube }))
+    at('2026-01-02T00:00:00.000Z')
+    repos.videos.insert(newVideo({ sourceKind: 'youtube', filePath: null, youtube }))
+    expect(repos.videos.findByYoutubeId(youtube.id)?.id).toBe(first.id)
+  })
+
+  it('updates YouTube metadata together with the id lookup', () => {
+    const video = repos.videos.insert(newVideo({ sourceKind: 'youtube', filePath: null, youtube }))
+    const refreshed: YoutubeMeta = { ...youtube, heatmapAvailable: true, durationSec: null, liveStatus: null, channel: null, uploadDate: null }
+    expect(repos.videos.update(video.id, { youtube: refreshed, filePath: '/data/downloads/x.mp4' }))
+      .toMatchObject({ youtube: refreshed, filePath: '/data/downloads/x.mp4' })
+    // Leaving youtube out keeps it.
+    expect(repos.videos.update(video.id, { title: '新標題' })?.youtube).toEqual(refreshed)
+
+    const other: YoutubeMeta = { ...youtube, id: 'abcdefghijk' }
+    repos.videos.update(video.id, { youtube: other })
+    expect(repos.videos.findByYoutubeId(youtube.id)).toBeNull()
+    expect(repos.videos.findByYoutubeId(other.id)?.youtube).toEqual(other)
+
+    expect(repos.videos.update(video.id, { youtube: null })?.youtube).toBeNull()
+    expect(repos.videos.findByYoutubeId(other.id)).toBeNull()
+  })
+
+  it('reads unreadable stored YouTube metadata as null', () => {
+    const video = repos.videos.insert(newVideo({ sourceKind: 'youtube', filePath: null, youtube }))
+    const bad = [
+      '{oops',
+      '[]',
+      'null',
+      JSON.stringify({ ...youtube, id: 'short' }),
+      JSON.stringify({ ...youtube, liveStatus: 'live' }),
+      JSON.stringify({ ...youtube, durationSec: '60' }),
+      JSON.stringify({ ...youtube, chatAvailable: undefined }),
+    ]
+    for (const json of bad) {
+      db.prepare('UPDATE videos SET youtube_json = ? WHERE id = ?').run(json, video.id)
+      expect(repos.videos.get(video.id)!.youtube, json).toBeNull()
+    }
+    // Unknown keys are dropped.
+    db.prepare('UPDATE videos SET youtube_json = ? WHERE id = ?').run(JSON.stringify({ ...youtube, extra: 1 }), video.id)
+    expect(repos.videos.get(video.id)!.youtube).toEqual(youtube)
   })
 
   it('lists newest first, even within the same millisecond', () => {

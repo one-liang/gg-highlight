@@ -26,7 +26,10 @@ export interface CandidateOptions {
   padSec: number
   /** Cap = ceil(hours × perHour). */
   perHour: number
-  /** Stop when the best remaining second scores below this. */
+  /**
+   * Stop when the best remaining second scores below this. Scaled down when the run's Signal weights
+   * add up to more than loudness + transcript (effectiveMinPeak).
+   */
   minPeak: number
   /** Expand while the score stays at or above this fraction of the peak. */
   expandRatio: number
@@ -56,5 +59,10 @@ export interface CandidateDraft {
   reason: string
 }
 
-/** Reason used when no LLM moment overlaps a candidate. */
+/**
+ * Reasons used when no LLM moment overlaps a candidate: the one of the Signal with the largest
+ * weight × peak value inside the range (design.md「候選精華片段」step 6).
+ */
 export const LOUDNESS_REASON = '音量突然升高，可能是大叫、爆笑或激動的反應'
+export const CHAT_REASON = '聊天室突然熱烈起來'
+export const HEATMAP_REASON = '很多觀眾重看這一段（YouTube 重播熱度）'

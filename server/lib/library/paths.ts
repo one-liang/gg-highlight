@@ -7,6 +7,8 @@ export const VIDEO_EXTENSIONS = ['.mp4', '.mkv', '.mov', '.flv', '.webm', '.ts',
 
 const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 export const UPLOAD_ID_RE = new RegExp(`^${UUID}$`)
+/** Source Video ids as the repositories generate them (randomUUID: lower-case UUID). */
+export const VIDEO_ID_RE = new RegExp(`^${UUID}$`)
 /** <uploadId><ext>[.part] or the <uploadId>.json sidecar. */
 const UPLOAD_NAME_RE = new RegExp(`^(${UUID})(\\.[A-Za-z0-9]+)(\\.part)?$`)
 

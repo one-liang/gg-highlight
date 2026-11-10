@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest'
 import type { SignalKind } from '../../../shared/types/domain'
 import { momentsTrack } from '../signals/tracks'
 import type { NamedTrack, TranscriptMoment } from '../signals/types'
-import { buildCandidates, candidateCap, rangeScore, reasonFor } from './candidates'
-import { DEFAULT_CANDIDATE_OPTIONS, LOUDNESS_REASON } from './types'
+import { buildCandidates, candidateCap, effectiveMinPeak, rangeScore, reasonFor } from './candidates'
+import { CHAT_REASON, DEFAULT_CANDIDATE_OPTIONS, HEATMAP_REASON, LOUDNESS_REASON } from './types'
 import type { CandidateDraft, CandidateInput, TimeRange } from './types'
 
 /** Per-second values: 0 everywhere except the given [from, to] (inclusive) runs. */
@@ -288,13 +288,95 @@ describe('buildCandidates: reasons', () => {
   })
 
   it('takes the first of equally scored moments and skips empty reasons', () => {
-    expect(reasonFor({ start: 0, end: 30 }, [moment(1, 2, 0.9, ' '), moment(3, 4, 0.8, '第一個'), moment(5, 6, 0.8, '第二個')]))
-      .toBe('第一個')
+    const moments = [moment(1, 2, 0.9, ' '), moment(3, 4, 0.8, '第一個'), moment(5, 6, 0.8, '第二個')]
+    expect(reasonFor({ start: 0, end: 30 }, { moments, tracks: [] })).toBe('第一個')
   })
 
   it('falls back to the loudness reason without an overlapping moment', () => {
-    expect(reasonFor({ start: 0, end: 30 }, [])).toBe(LOUDNESS_REASON)
-    expect(reasonFor({ start: 0, end: 30 }, [moment(30, 40, 1, '剛好接在後面')])).toBe(LOUDNESS_REASON)
+    const loud = track('loudness', values(60, [10, 12, 1]))
+    expect(reasonFor({ start: 0, end: 30 }, { moments: [], tracks: [loud] })).toBe(LOUDNESS_REASON)
+    expect(reasonFor({ start: 0, end: 30 }, { moments: [moment(30, 40, 1, '剛好接在後面')], tracks: [loud] })).toBe(LOUDNESS_REASON)
+  })
+
+  it('prefers an overlapping moment over every track', () => {
+    const tracks = [track('chat', values(60, [0, 59, 1])), track('heatmap', values(60, [0, 59, 1]))]
+    expect(reasonFor({ start: 0, end: 30 }, { moments: [moment(5, 8, 0.7, '逆轉勝')], tracks })).toBe('逆轉勝')
+  })
+})
+
+describe('reasonFor without an LLM moment', () => {
+  const range = { start: 10, end: 30 }
+  const reason = (...tracks: NamedTrack[]) => reasonFor(range, { moments: [], tracks })
+
+  it('uses the track with the largest weight × peak inside the range', () => {
+    const loud = track('loudness', values(60, [12, 14, 0.9]))
+    const chat = track('chat', values(60, [20, 22, 0.7]))
+    const heatmap = track('heatmap', values(60, [25, 27, 0.5]))
+    // 0.9 × 1 < 0.7 × 1.5 = 1.05 ≥ 0.5 × 2
+    expect(reason(loud, chat, heatmap, track('transcript', values(60)))).toBe(CHAT_REASON)
+    // 0.9 < 0.6 × 2 = 1.2
+    expect(reason(loud, chat, track('heatmap', values(60, [25, 27, 0.6])))).toBe(HEATMAP_REASON)
+    expect(reason(track('loudness', values(60, [12, 14, 1])), track('chat', values(60, [20, 22, 0.5])))).toBe(LOUDNESS_REASON)
+  })
+
+  it('only looks inside the range', () => {
+    const loud = track('loudness', values(60, [12, 14, 0.5]))
+    const chat = track('chat', values(60, [30, 40, 1])) // starts where the range ends
+    const heatmap = track('heatmap', values(60, [0, 9, 1])) // ends where the range starts
+    expect(reason(loud, chat, heatmap)).toBe(LOUDNESS_REASON)
+  })
+
+  it('breaks ties in the order loudness, chat, heatmap', () => {
+    // 0.75 × 1 = 0.5 × 1.5 = 0.375 × 2 (all exact in float32)
+    const loud = track('loudness', values(60, [12, 12, 0.75]))
+    const chat = track('chat', values(60, [20, 20, 0.5]))
+    const heatmap = track('heatmap', values(60, [25, 25, 0.375]))
+    expect(reason(heatmap, chat, loud)).toBe(LOUDNESS_REASON)
+    expect(reason(heatmap, chat)).toBe(CHAT_REASON)
+    // all zero: the first present one in that order
+    expect(reason(track('heatmap', values(60)), track('chat', values(60)), track('loudness', values(60)))).toBe(LOUDNESS_REASON)
+  })
+
+  it('ignores seconds a track does not cover', () => {
+    const covered = new Uint8Array(60).fill(1).fill(0, 20, 30)
+    const heatmap: NamedTrack = { kind: 'heatmap', values: values(60, [20, 29, 1]), covered }
+    const loud = track('loudness', values(60, [12, 14, 0.5]))
+    expect(reason(loud, heatmap)).toBe(LOUDNESS_REASON)
+    expect(reason(loud, { ...heatmap, covered: undefined })).toBe(HEATMAP_REASON)
+  })
+
+  it('clamps values to 0–1 and treats NaN as 0', () => {
+    const loud = track('loudness', values(60, [12, 14, 0.9]))
+    expect(reason(loud, track('chat', values(60, [20, 22, Number.NaN])))).toBe(LOUDNESS_REASON)
+    // 5 → 1: 1 × 1.5 > 0.9
+    expect(reason(loud, track('chat', values(60, [20, 22, 5])))).toBe(CHAT_REASON)
+    // 5 → 1: 1 × 1 < 0.8 × 1.5
+    expect(reason(track('loudness', values(60, [12, 14, 5])), track('chat', values(60, [20, 22, 0.8])))).toBe(CHAT_REASON)
+  })
+
+  it('keeps the loudness reason without loudness, chat or heatmap tracks', () => {
+    expect(reason()).toBe(LOUDNESS_REASON)
+    expect(reason(track('transcript', values(60, [10, 29, 1])))).toBe(LOUDNESS_REASON)
+  })
+
+  it('picks among the tracks the run has', () => {
+    expect(reason(track('heatmap', values(60)))).toBe(HEATMAP_REASON)
+    expect(reason(track('transcript', values(60)), track('chat', values(60, [15, 15, 0.1])))).toBe(CHAT_REASON)
+  })
+})
+
+describe('effectiveMinPeak', () => {
+  const kinds = (...list: SignalKind[]) => list.map(kind => ({ kind }))
+
+  it('is minPeak × min(1, 3 ÷ the weight total of the run', () => {
+    expect(effectiveMinPeak(0.2, kinds('loudness', 'transcript'))).toBe(0.2)
+    expect(effectiveMinPeak(0.2, kinds('loudness'))).toBe(0.2)
+    expect(effectiveMinPeak(0.2, kinds('transcript'))).toBe(0.2)
+    expect(effectiveMinPeak(0.2, kinds())).toBe(0.2)
+    expect(effectiveMinPeak(0.2, kinds('loudness', 'transcript', 'chat', 'heatmap'))).toBeCloseTo((0.2 * 3) / 6.5, 12)
+    expect(effectiveMinPeak(0.2, kinds('loudness', 'transcript', 'heatmap'))).toBeCloseTo((0.2 * 3) / 5, 12)
+    expect(effectiveMinPeak(0.2, kinds('loudness', 'chat'))).toBe(0.2)
+    expect(effectiveMinPeak(0.4, kinds('loudness', 'transcript', 'chat'))).toBeCloseTo((0.4 * 3) / 4.5, 12)
   })
 })
 
@@ -313,6 +395,34 @@ describe('buildCandidates: signals', () => {
     // The transcript moment (weight 2/3) outranks the loudness burst (1/3); both become candidates.
     expect(result.map(c => c.reason)).toEqual([LOUDNESS_REASON, '尖叫'])
     expect(result[1]!.score).toBeGreaterThan(result[0]!.score)
+  })
+
+  it('still finds a loudness spike when chat and heatmap are flat (all four tracks present)', () => {
+    // Combined peak 1 ÷ 6.5 ≈ 0.154: below the plain 0.2, above the effective 0.2 × 3 ÷ 6.5 ≈ 0.092.
+    const flat = () => values(120)
+    const tracks = [burst(), track('transcript', flat()), track('chat', flat()), track('heatmap', flat())]
+    const result = buildCandidates(input({ durationSec: 120, tracks }))
+    expect(result).toEqual([{ start: expect.any(Number), end: expect.any(Number), score: expect.any(Number), reason: LOUDNESS_REASON }])
+    expect(result[0]!.start).toBeLessThanOrEqual(42)
+    expect(result[0]!.end).toBeGreaterThanOrEqual(58)
+    expect(result[0]!.score).toBeGreaterThan(0.1)
+    // Effective threshold boundary: 0.55 ÷ 6.5 ≈ 0.085 stops, 0.65 ÷ 6.5 = 0.1 does not.
+    const weak = (value: number) => [track('loudness', values(120, [40, 59, value])), ...tracks.slice(1)]
+    expect(buildCandidates(input({ durationSec: 120, tracks: weak(0.55) }))).toEqual([])
+    expect(buildCandidates(input({ durationSec: 120, tracks: weak(0.65) }))).toHaveLength(1)
+  })
+
+  it('names chat and heatmap peaks with their own reasons', () => {
+    const tracks = [
+      track('loudness', values(600, [100, 119, 0.2])),
+      track('transcript', values(600)),
+      track('chat', values(600, [100, 119, 1])),
+      track('heatmap', values(600, [400, 429, 1])),
+    ]
+    const result = buildCandidates(input({ durationSec: 600, tracks }))
+    expect(result.map(c => c.reason)).toEqual([CHAT_REASON, HEATMAP_REASON])
+    expect(result[0]!.start).toBeLessThanOrEqual(100)
+    expect(result[1]!.start).toBeLessThanOrEqual(400)
   })
 
   it('is deterministic and independent of track order', () => {

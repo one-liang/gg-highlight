@@ -4,10 +4,11 @@ import path from 'node:path'
 import { Readable } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type AppConfig, clipsDir, isInside, loadConfig, uploadsDir, videoWorkDir } from '../config'
+import type { YoutubeMeta } from '../../../shared/types/domain'
 import type { VideoRecord } from '../db'
 import {
-  cleanupOrphanUploads, deleteInsideDataDir, downloadsDir, isInWatchFolders, listWatchFolderFiles, ownedPaths,
-  pathKey, removeVideoFiles, resolveUpload, saveUpload, toSourceVideo, VIDEO_EXTENSIONS,
+  cleanupOrphanDownloads, cleanupOrphanUploads, deleteInsideDataDir, downloadsDir, isInWatchFolders, listDownloadFiles,
+  listWatchFolderFiles, ownedPaths, pathKey, removeVideoFiles, resolveUpload, saveUpload, toSourceVideo, VIDEO_EXTENSIONS,
 } from './index'
 
 let root: string
@@ -36,6 +37,7 @@ function record(overrides: Partial<VideoRecord> = {}): VideoRecord {
     sourceKind: 'watch-folder',
     filePath: path.join(root, 'recordings', 'a.mkv'),
     youtubeUrl: null,
+    youtube: null,
     language: 'zh',
     audioTrack: 0,
     media: null,
@@ -396,7 +398,103 @@ describe('removeVideoFiles', () => {
   })
 })
 
+describe('YouTube downloads', () => {
+  const id = '11111111-2222-4333-8444-555555555555'
+  const otherId = '99999999-2222-4333-8444-555555555555'
+  const dl = (name: string) => path.join(downloadsDir(config), name)
+  /** What yt-dlp leaves behind for a video: partial streams, fragments, resume info, chat replay. */
+  const partials = (videoId: string) => [
+    `${videoId}.f137.mp4.part`, `${videoId}.f137.mp4.part-Frag3`, `${videoId}.f251.webm`, `${videoId}.mp4.ytdl`,
+    `${videoId}.temp.mp4`, `${videoId}.live_chat.json.part`,
+  ]
+  const sorted = (paths: string[]) => [...paths].sort()
+
+  it('lists every <id>.* file of the video, and nothing else', async () => {
+    const mine = [`${id}.mp4`, `${id}.live_chat.json`, ...partials(id)].map(name => write(dl(name)))
+    write(dl(`${otherId}.mp4`))
+    write(dl(`${id}-x.mp4`))
+    write(dl(id))
+    write(dl('readme.txt'))
+    write(path.join(dl(`${id}.folder`), 'inside.mp4'))
+    expect(sorted(await listDownloadFiles(config, id))).toEqual(sorted(mine))
+  })
+
+  it('lists nothing for unsafe ids or without a downloads folder', async () => {
+    expect(await listDownloadFiles(config, id)).toEqual([])
+    write(dl('.mp4'))
+    write(dl('...mp4'))
+    for (const bad of ['', '.', '..', `..${path.sep}x`]) expect(await listDownloadFiles(config, bad), bad).toEqual([])
+  })
+
+  it('removal deletes the partial download while filePath is still null', async () => {
+    const mine = partials(id).map(name => write(dl(name)))
+    const others = [`${otherId}.mp4`, `${otherId}.f137.mp4.part`, 'readme.txt'].map(name => write(dl(name)))
+    const folder = write(path.join(dl(`${id}.folder`), 'inside.mp4'))
+    write(path.join(videoWorkDir(config, id), 'audio.wav'))
+
+    await removeVideoFiles(config, record({ id, sourceKind: 'youtube', filePath: null }))
+    for (const gone of mine) expect(fs.existsSync(gone), gone).toBe(false)
+    for (const kept of [...others, folder]) expect(fs.existsSync(kept), kept).toBe(true)
+    expect(fs.existsSync(videoWorkDir(config, id))).toBe(false)
+    expect(fs.existsSync(downloadsDir(config))).toBe(true)
+  })
+
+  it('removal deletes the download and the chat replay', async () => {
+    const file = write(dl(`${id}.mp4`))
+    const chat = write(dl(`${id}.live_chat.json`))
+    await removeVideoFiles(config, record({ id, sourceKind: 'youtube', filePath: file }))
+    expect(fs.existsSync(file)).toBe(false)
+    expect(fs.existsSync(chat)).toBe(false)
+  })
+
+  it('removal of a local video never deletes files from downloads', async () => {
+    const original = write(dl(`${id}.mkv`))
+    const named = write(dl(`${id}.mp4`))
+    await removeVideoFiles(config, record({ id, sourceKind: 'watch-folder', filePath: original }))
+    const uploaded = await saveUpload(config, 'a.mp4', Readable.from([Buffer.from('x')]))
+    await removeVideoFiles(config, record({ id, sourceKind: 'upload', filePath: uploaded.filePath }))
+    expect(fs.existsSync(original)).toBe(true)
+    expect(fs.existsSync(named)).toBe(true)
+  })
+
+  it('removal ignores a YouTube download path outside the downloads folder', async () => {
+    const outside = write(path.join(root, 'recordings', `${id}.mp4`))
+    await removeVideoFiles(config, record({ id, sourceKind: 'youtube', filePath: outside }))
+    expect(fs.existsSync(outside)).toBe(true)
+  })
+
+  it('cleans up files of unknown video ids at startup, and nothing else', async () => {
+    const known = [`${id}.mp4`, `${id}.live_chat.json`, ...partials(id)].map(name => write(dl(name)))
+    const orphans = [`${otherId}.mp4`, `${otherId}.live_chat.json`, ...partials(otherId)].map(name => write(dl(name)))
+    const unrelated = [
+      'readme.txt', 'abc.mp4', '.hidden', otherId, 'AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE.mp4', `x${otherId}.mp4`,
+      'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee-extra.mp4',
+    ].map(name => write(dl(name)))
+    const folder = write(path.join(dl(`${otherId}.folder`), 'inside.mp4'))
+    const elsewhere = write(path.join(uploadsDir(config), `${otherId}.mp4`))
+
+    expect(await cleanupOrphanDownloads(config, new Set([id]))).toBe(orphans.length)
+    for (const gone of orphans) expect(fs.existsSync(gone), gone).toBe(false)
+    for (const kept of [...known, ...unrelated, folder, elsewhere]) expect(fs.existsSync(kept), kept).toBe(true)
+
+    // Any iterable of ids works; nothing left to do.
+    expect(await cleanupOrphanDownloads(config, [id])).toBe(0)
+  })
+
+  it('cleans up nothing without a downloads folder', async () => {
+    expect(await cleanupOrphanDownloads(config, [])).toBe(0)
+  })
+})
+
 describe('toSourceVideo', () => {
+  it('keeps the YouTube metadata', async () => {
+    const youtube: YoutubeMeta = {
+      id: 'dQw4w9WgXcQ', channel: '頻道', durationSec: 60, liveStatus: 'not_live', uploadDate: null, chatAvailable: false, heatmapAvailable: true,
+    }
+    const video = await toSourceVideo(record({ sourceKind: 'youtube', filePath: null, youtubeUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', youtube }))
+    expect(video).toMatchObject({ youtube, fileMissing: false, filePath: null })
+  })
+
   it('checks the file on disk and drops previewPath', async () => {
     const file = write(path.join(root, 'recordings', 'a.mkv'))
     const present = await toSourceVideo(record({ filePath: file, previewPath: '/x/preview.mp4' }))

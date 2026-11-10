@@ -1,4 +1,4 @@
-// Spawning the transcriber CLI: line splitting, stderr tail, abort with process-tree kill.
+// Spawning a CLI (the transcriber, also yt-dlp): line splitting, stderr tail, abort with process-tree kill.
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { StringDecoder } from 'node:string_decoder'
 
@@ -10,8 +10,28 @@ const ABORT_GRACE_MS = 5000
 
 export const SPAWN_NOT_FOUND_MESSAGE = '找不到轉錄程式，請先執行安裝腳本'
 
-export function abortError(cause?: unknown): Error {
-  const err = new Error('語音辨識已取消', cause === undefined ? undefined : { cause })
+/** zh-TW texts for failures to start the CLI, and for an abort. */
+export interface CliMessages {
+  /** The executable does not exist (ENOENT). */
+  notFound: string
+  /** The command array is empty. */
+  emptyCommand: string
+  /** Put before the OS message of any other start failure. */
+  startFailed: string
+  /** Message of the AbortError after an abort. */
+  aborted: string
+}
+
+/** Defaults of runCli: the transcriber's texts. */
+export const TRANSCRIBER_CLI_MESSAGES: CliMessages = {
+  notFound: SPAWN_NOT_FOUND_MESSAGE,
+  emptyCommand: '轉錄程式的指令是空的，請檢查 GG_TRANSCRIBER_CMD 設定',
+  startFailed: '無法啟動轉錄程式：',
+  aborted: '語音辨識已取消',
+}
+
+export function abortError(cause?: unknown, message = TRANSCRIBER_CLI_MESSAGES.aborted): Error {
+  const err = new Error(message, cause === undefined ? undefined : { cause })
   err.name = 'AbortError'
   return err
 }
@@ -131,6 +151,12 @@ export interface CliRunOptions {
   onLine?: (line: string) => void
   /** Pulls the error message out of a line (keeps the last one). */
   errorOf?: (line: string) => string | null
+  /** Every complete stderr line (stderr is still kept as CliResult.stderr's tail). */
+  onStderrLine?: (line: string) => void
+  /** Raw stdout chunks, e.g. one JSON document too long for the line splitter. */
+  onStdoutData?: (chunk: Buffer) => void
+  /** Start-failure and abort texts; missing ones are the transcriber's (TRANSCRIBER_CLI_MESSAGES). */
+  messages?: Partial<CliMessages>
 }
 
 /**
@@ -139,9 +165,11 @@ export interface CliRunOptions {
  */
 export function runCli(command: string[], args: string[], opts: CliRunOptions = {}): Promise<CliResult> {
   const { signal } = opts
-  if (signal?.aborted) return Promise.reject(abortError(signal.reason))
+  const messages: CliMessages = { ...TRANSCRIBER_CLI_MESSAGES, ...opts.messages }
+  const abortErr = (cause?: unknown) => abortError(cause, messages.aborted)
+  if (signal?.aborted) return Promise.reject(abortErr(signal.reason))
   const [file, ...prefix] = command
-  if (!file) return Promise.reject(new Error('轉錄程式的指令是空的，請檢查 GG_TRANSCRIBER_CMD 設定'))
+  if (!file) return Promise.reject(new Error(messages.emptyCommand))
 
   return new Promise((resolve, reject) => {
     let child: ChildProcess
@@ -155,7 +183,7 @@ export function runCli(command: string[], args: string[], opts: CliRunOptions = 
       })
     }
     catch (err) {
-      reject(spawnError(err as NodeJS.ErrnoException))
+      reject(spawnError(err as NodeJS.ErrnoException, messages))
       return
     }
 
@@ -173,6 +201,18 @@ export function runCli(command: string[], args: string[], opts: CliRunOptions = 
         console.warn('[transcription] line handler failed:', err)
       }
     })
+    const stderrLines = opts.onStderrLine
+      ? new LineSplitter((line) => {
+          try {
+            opts.onStderrLine?.(line)
+          }
+          catch (err) {
+            console.warn('[cli] stderr line handler failed:', err)
+          }
+        })
+      : null
+    // Raw-stdout callers that want no lines skip the splitter (it drops lines longer than 1 MiB anyway).
+    const splitStdout = !opts.onStdoutData || !!opts.onLine || !!opts.errorOf
 
     const finish = (err: Error | null, result?: CliResult) => {
       if (settled) return
@@ -185,7 +225,7 @@ export function runCli(command: string[], args: string[], opts: CliRunOptions = 
     const onAbort = () => {
       aborted = true
       killTree(child)
-      setTimeout(() => finish(abortError(signal?.reason)), ABORT_GRACE_MS).unref()
+      setTimeout(() => finish(abortErr(signal?.reason)), ABORT_GRACE_MS).unref()
     }
     signal?.addEventListener('abort', onAbort, { once: true })
     if (child.pid !== undefined) {
@@ -193,27 +233,34 @@ export function runCli(command: string[], args: string[], opts: CliRunOptions = 
       installExitHook()
     }
 
-    child.stdout?.on('data', (chunk: Buffer) => lines.push(chunk))
-    child.stderr?.on('data', (chunk: Buffer) => stderr.push(chunk))
+    child.stdout?.on('data', (chunk: Buffer) => {
+      opts.onStdoutData?.(chunk)
+      if (splitStdout) lines.push(chunk)
+    })
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr.push(chunk)
+      stderrLines?.push(chunk)
+    })
     child.on('error', (err: NodeJS.ErrnoException) => {
-      if (aborted) return finish(abortError(signal?.reason))
+      if (aborted) return finish(abortErr(signal?.reason))
       // Spawn failures (ENOENT, EACCES) have no pid; other errors are followed by 'close'.
-      if (child.pid === undefined) finish(spawnError(err))
+      if (child.pid === undefined) finish(spawnError(err, messages))
     })
     child.on('exit', () => {
-      if (aborted) finish(abortError(signal?.reason))
+      if (aborted) finish(abortErr(signal?.reason))
     })
     child.on('close', (code, sig) => {
-      if (aborted) return finish(abortError(signal?.reason))
+      if (aborted) return finish(abortErr(signal?.reason))
       lines.end()
+      stderrLines?.end()
       finish(null, { code, signal: sig, lastError, stderr: stderr.value })
     })
   })
 }
 
-function spawnError(err: NodeJS.ErrnoException): Error {
-  if (err.code === 'ENOENT') return new Error(SPAWN_NOT_FOUND_MESSAGE, { cause: err })
-  return new Error(`無法啟動轉錄程式：${err.message}`, { cause: err })
+function spawnError(err: NodeJS.ErrnoException, messages: CliMessages): Error {
+  if (err.code === 'ENOENT') return new Error(messages.notFound, { cause: err })
+  return new Error(`${messages.startFailed}${err.message}`, { cause: err })
 }
 
 /** Why a run failed, for the user: the CLI's error event, else the stderr tail, else the exit status. */

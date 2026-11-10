@@ -50,6 +50,7 @@ function addVideo(filePath: string, opts: { audioTrack?: number, language?: Lang
     sourceKind: 'watch-folder',
     filePath,
     youtubeUrl: null,
+    youtube: null,
     language: opts.language ?? 'en',
     audioTrack: opts.audioTrack ?? 0,
     media: null,

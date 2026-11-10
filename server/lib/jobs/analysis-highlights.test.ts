@@ -73,7 +73,7 @@ async function addVideo(opts: { language?: Language, copy?: boolean } = {}) {
     await fsp.copyFile(burstVideo, filePath)
   }
   return env.repos.videos.insert({
-    title: 'burst', sourceKind: 'watch-folder', filePath, youtubeUrl: null, language: opts.language ?? 'en', audioTrack: 0, media: null,
+    title: 'burst', sourceKind: 'watch-folder', filePath, youtubeUrl: null, youtube: null, language: opts.language ?? 'en', audioTrack: 0, media: null,
   })
 }
 

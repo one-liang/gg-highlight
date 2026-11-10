@@ -1,16 +1,27 @@
 // Candidate Highlights from Signals (design.md「候選精華片段」).
+import type { SignalKind } from '../../../shared/types/domain'
 import { combineTracks } from '../signals/tracks'
-import type { SignalTrack, TranscriptMoment } from '../signals/types'
+import { SIGNAL_WEIGHTS } from '../signals/types'
+import type { NamedTrack, SignalTrack, TranscriptMoment } from '../signals/types'
 import { cleanRanges, EPS, freeAround, overlaps, rangeLength, roundToTenths, secondsOf } from './ranges'
 import { snapToSentences } from './snap'
 import type { SnapLimits } from './snap'
-import { DEFAULT_CANDIDATE_OPTIONS, LOUDNESS_REASON } from './types'
+import { CHAT_REASON, DEFAULT_CANDIDATE_OPTIONS, HEATMAP_REASON, LOUDNESS_REASON } from './types'
 import type { CandidateDraft, CandidateInput, CandidateOptions, TimeRange } from './types'
 
 /** Highlight Score = PEAK_WEIGHT × peak + MEAN_WEIGHT × mean over the range. */
 const PEAK_WEIGHT = 0.7
 const MEAN_WEIGHT = 0.3
 const SECONDS_PER_HOUR = 3600
+/** Signal weight total the plain minPeak is meant for: loudness (1) + transcript (2). */
+const MIN_PEAK_WEIGHT_TOTAL = 3
+
+/** Signals whose own reason explains a candidate without an LLM moment, in tie-break order. */
+const FALLBACK_REASONS: ReadonlyArray<readonly [SignalKind, string]> = [
+  ['loudness', LOUDNESS_REASON],
+  ['chat', CHAT_REASON],
+  ['heatmap', HEATMAP_REASON],
+]
 
 interface Limits extends SnapLimits {
   durationSec: number
@@ -49,10 +60,11 @@ export function buildCandidates(input: CandidateInput, options: Partial<Candidat
   const blocked: Blocked = { kept: new Uint8Array(scores.length), near: new Uint8Array(scores.length) }
   for (const range of occupied) markSeconds(blocked.kept, range)
 
+  const minPeak = effectiveMinPeak(opts.minPeak, input.tracks)
   let chosen: ScoredRange[] = []
   for (const peak of secondsByScore(scores)) {
     const peakScore = scores[peak]!
-    if (chosen.length >= cap || peakScore < opts.minPeak || peakScore <= 0) break
+    if (chosen.length >= cap || peakScore < minPeak || peakScore <= 0) break
     if (blocked.kept[peak] || blocked.near[peak]) continue
 
     // Step 3: expand around the peak.
@@ -74,7 +86,17 @@ export function buildCandidates(input: CandidateInput, options: Partial<Candidat
   // Step 7: ordered by start.
   return chosen
     .sort((a, b) => a.start - b.start)
-    .map(({ start, end, score }) => ({ start, end, score, reason: reasonFor({ start, end }, input.moments) }))
+    .map(({ start, end, score }) => ({ start, end, score, reason: reasonFor({ start, end }, input) }))
+}
+
+/**
+ * Step 3's peak threshold: minPeak × min(1, 3 ÷ total SIGNAL_WEIGHTS of the run's tracks). Loudness and
+ * transcript (total 3) keep minPeak; YouTube's extra chat and heatmap lower it, so one Signal's high
+ * point is not stopped just because more Signals share the weighting.
+ */
+export function effectiveMinPeak(minPeak: number, tracks: ReadonlyArray<Pick<NamedTrack, 'kind'>>): number {
+  const total = tracks.reduce((sum, track) => sum + SIGNAL_WEIGHTS[track.kind], 0)
+  return total > MIN_PEAK_WEIGHT_TOTAL ? minPeak * (MIN_PEAK_WEIGHT_TOTAL / total) : minPeak
 }
 
 /** ceil(hours × perHour), at least 1 for any video when perHour > 0. */
@@ -98,16 +120,46 @@ export function rangeScore(scores: SignalTrack, range: TimeRange): number {
   return Math.round(Math.min(1, Math.max(0, score)) * 1000) / 1000
 }
 
-/** Highlight Reason: the reason of the highest-scoring LLM moment overlapping the range (the first on a tie), else LOUDNESS_REASON. */
-export function reasonFor(range: TimeRange, moments: readonly TranscriptMoment[]): string {
+/**
+ * Highlight Reason: the reason of the highest-scoring LLM moment overlapping the range (the first on a
+ * tie). Without one, the reason of the loudness / chat / heatmap track with the largest weight × peak
+ * value inside the range (ties in that order); LOUDNESS_REASON when the run has none of those tracks.
+ */
+export function reasonFor(range: TimeRange, input: Pick<CandidateInput, 'moments' | 'tracks'>): string {
   let best: TranscriptMoment | null = null
-  for (const moment of moments) {
+  for (const moment of input.moments) {
     if (!moment.reason.trim() || !Number.isFinite(moment.score)) continue
     const span = { start: Math.min(moment.start, moment.end), end: Math.max(moment.start, moment.end) }
     if (!overlaps(range, span)) continue
     if (!best || moment.score > best.score) best = moment
   }
-  return best ? best.reason.trim() : LOUDNESS_REASON
+  if (best) return best.reason.trim()
+
+  let reason = LOUDNESS_REASON
+  let bestValue = -1
+  for (const [kind, kindReason] of FALLBACK_REASONS) {
+    for (const track of input.tracks) {
+      if (track.kind !== kind) continue
+      const value = SIGNAL_WEIGHTS[kind] * peakIn(track, range)
+      if (value > bestValue) {
+        bestValue = value
+        reason = kindReason
+      }
+    }
+  }
+  return reason
+}
+
+/** Highest value (clamped to 0–1, NaN as 0) of a track over the seconds the range touches, skipping uncovered seconds; 0 when none. */
+function peakIn(track: NamedTrack, range: TimeRange): number {
+  const { first, last } = secondsOf(range, track.values.length)
+  let peak = 0
+  for (let i = first; i <= last; i++) {
+    if (track.covered && track.covered[i] === 0) continue
+    const value = track.values[i]!
+    if (value > peak) peak = Math.min(1, value)
+  }
+  return peak
 }
 
 /** Track indexes from the highest score to the lowest; equal scores keep time order. */

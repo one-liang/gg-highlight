@@ -101,6 +101,17 @@ export const MIGRATIONS: Migration[] = [
       UPDATE videos SET analysis_version = 1 WHERE analysis_status = 'done';
     `,
   },
+  {
+    // Milestone 3: YouTube metadata of the Source Video (design.md「YouTube」). youtube_id duplicates
+    // youtube_json's id so「同一支 YouTube 影片不能重複加入」is an indexed lookup.
+    // ADD COLUMN only, for the same reason as version 2.
+    version: 3,
+    sql: `
+      ALTER TABLE videos ADD COLUMN youtube_id TEXT;
+      ALTER TABLE videos ADD COLUMN youtube_json TEXT;
+      CREATE INDEX videos_youtube_id ON videos (youtube_id);
+    `,
+  },
 ]
 
 let savepointSeq = 0
