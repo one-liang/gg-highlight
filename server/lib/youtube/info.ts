@@ -5,13 +5,12 @@ import { canonicalYoutubeUrl, PLAYLIST_OR_CHANNEL_MESSAGE } from '../../../share
 import type { Language, YoutubeLiveStatus } from '../../../shared/types/domain'
 import type { HeatmapMarker } from '../signals/types'
 import { metadataArgs } from './command'
-import { exitStatusText, mapYtdlpError, METADATA_TIMEOUT_MESSAGE, noteUpdateHint, YTDLP_ERROR_MESSAGES } from './errors'
+import { exitStatusText, mapYtdlpError, METADATA_FAILED_PREFIX, METADATA_TIMEOUT_MESSAGE, noteUpdateHint, YTDLP_ERROR_MESSAGES } from './errors'
 import { logFailure, runYtdlp } from './run'
 import { type YoutubeMetadata, type YtdlpConfig, YtdlpError, type YtdlpRunOptions } from './types'
 
 export const METADATA_TIMEOUT_MS = 90_000
 export const NOT_VIDEO_MESSAGE = PLAYLIST_OR_CHANNEL_MESSAGE
-const METADATA_FAILED_PREFIX = '向 YouTube 讀取影片資訊失敗：'
 
 const LIVE_STATUSES = ['not_live', 'was_live', 'post_live', 'is_live', 'is_upcoming'] as const satisfies readonly YoutubeLiveStatus[]
 
@@ -161,7 +160,7 @@ export async function fetchMetadata(config: YtdlpConfig, url: string, options: F
     if (json === undefined) {
       logFailure(log, '讀取影片資訊', result)
       const reason = result.code === 0 ? 'yt-dlp 沒有回傳影片資訊' : `yt-dlp 異常結束（${exitStatusText(result)}）`
-      throw mapYtdlpError(result.errorLines, result, `${METADATA_FAILED_PREFIX}${reason}`)
+      throw mapYtdlpError(result.errorLines, result, `${METADATA_FAILED_PREFIX}${reason}`, METADATA_FAILED_PREFIX)
     }
     const meta = parseMetadata(json, now())
     assertAddable(meta)

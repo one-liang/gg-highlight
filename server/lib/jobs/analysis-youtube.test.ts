@@ -11,7 +11,7 @@ import { canonicalYoutubeUrl } from '../../../shared/utils/youtube-url'
 import { downloadsDir } from '../library'
 import { readSignalsFile, writeSignalsFile } from '../signals'
 import {
-  CHAT_FAILED_PREFIX, chatFilePath, createMetadataCache, createYoutubeTools, parseMetadata, YTDLP_ERROR_MESSAGES, YtdlpError,
+  CHAT_FAILED_PREFIX, chatFilePath, createMetadataCache, createYoutubeTools, parseMetadata, YTDLP_ERROR_CAUSES, YTDLP_ERROR_MESSAGES, YtdlpError,
   type MetadataCache, type YoutubeTools,
 } from '../youtube'
 import { FAKE_YTDLP_IDS, fakeMetadata, fakeYtdlpCommand, readArgsLogs } from '../youtube/test-helpers/fake-yt-dlp.mjs'
@@ -245,7 +245,7 @@ describe('YouTube full Analysis: the download step', () => {
     const done = await rerun(makeQueue({ youtube: blocked }), video.id, 'full')
     expect(done.analysis).toMatchObject({ status: 'done', error: null })
     expect(statesOf(video.id)).toEqual(['loudness:used', 'transcript:missing', 'chat:used', 'heatmap:used'])
-    expect(mine(video.id)).toContain(`讀取影片資訊失敗，沿用已下載的影片檔與上次的資料：${YTDLP_ERROR_MESSAGES.blocked}`)
+    expect(mine(video.id)).toContain(`讀取影片資訊失敗，沿用已下載的影片檔與上次的資料：${YTDLP_ERROR_CAUSES.blocked}`)
     expect(mine(video.id)).toMatch(/這次讀不到影片資訊，沿用上次取得的重播熱度（/)
     // the carried heatmap stays in signals.json
     expect((await readSignalsFile(analysisFiles(env, video.id).signals))?.heatmap?.markers).toHaveLength(100)
@@ -289,7 +289,8 @@ describe('YouTube full Analysis: failures, cancel and recover', () => {
     const done = env.repos.videos.get(video.id)!
     expect(done.analysis).toMatchObject({ status: 'done', error: null })
     expect(done.analysis.signals?.slice(2)).toEqual([
-      { kind: 'chat', status: 'missing', reason: `${CHAT_FAILED_PREFIX}：${YTDLP_ERROR_MESSAGES.blocked}` },
+      // The cause only: the finished Analysis has no 重試 button (the UI names 只重新找精華片段).
+      { kind: 'chat', status: 'missing', reason: `${CHAT_FAILED_PREFIX}：YouTube 暫時拒絕這台電腦的連線（被當成機器人或請求太頻繁）` },
       { kind: 'heatmap', status: 'used', reason: null },
     ])
     expect(fs.existsSync(chatFile(video.id))).toBe(false)
@@ -299,6 +300,8 @@ describe('YouTube full Analysis: failures, cancel and recover', () => {
   it.each([
     ['still live', FAKE_YTDLP_IDS.liveNow, YTDLP_ERROR_MESSAGES.live],
     ['just ended', FAKE_YTDLP_IDS.postLive, YTDLP_ERROR_MESSAGES['post-live']],
+    // yt-dlp reports a stream that has not started as an ERROR line (no formats), not as live_status.
+    ['not started', FAKE_YTDLP_IDS.upcoming, YTDLP_ERROR_MESSAGES.live],
   ])('a live stream (%s) fails the download step with the live-status message, before any download', async (_name, youtubeId, message) => {
     const video = addYoutubeVideo(youtubeId)
     await runToEnd(makeQueue())
@@ -316,6 +319,12 @@ describe('YouTube full Analysis: failures, cancel and recover', () => {
     expect(failed.analysis.error).toMatch(/^下載影片失敗：YouTube 可能改版了/)
     expect(failed.filePath).toBeNull()
     expect(fs.readdirSync(downloadsDir(env.config))).toContain(`${video.id}.f137.mp4.part`)
+  })
+
+  it('retries used up while downloading (yt-dlp\'s "ERROR: \\r[download] Got error: …" line) are still read: 403 → 可能改版了', async () => {
+    const video = addYoutubeVideo(FAKE_YTDLP_IDS.retryErrors)
+    await runToEnd(makeQueue())
+    expect(env.repos.videos.get(video.id)!.analysis).toMatchObject({ status: 'failed', step: 'download', error: `下載影片失敗：${YTDLP_ERROR_MESSAGES.outdated}` })
   })
 
   it('a metadata failure when the file must be downloaded fails the step with the yt-dlp message', async () => {
@@ -406,14 +415,14 @@ describe('YouTube highlights-only Analysis', () => {
 
     const carried = await rerun(makeQueue({ youtube: failing }), video.id, 'highlights')
     expect(carried.analysis.signals?.[3]).toEqual({ kind: 'heatmap', status: 'used', reason: null })
-    expect(mine(video.id)).toContain(`無法重新讀取影片資訊，沿用上次的資料：${YTDLP_ERROR_MESSAGES.timeout}`)
+    expect(mine(video.id)).toContain(`無法重新讀取影片資訊，沿用上次的資料：${YTDLP_ERROR_CAUSES.timeout}`)
 
     const files = analysisFiles(env, video.id)
     const signals = (await readSignalsFile(files.signals))!
     await writeSignalsFile(files.signals, { ...signals, heatmap: null })
     const none = await rerun(makeQueue({ youtube: failing }), video.id, 'highlights')
     expect(none.analysis).toMatchObject({ status: 'done' })
-    expect(none.analysis.signals?.[3]).toEqual({ kind: 'heatmap', status: 'missing', reason: `${HEATMAP_FAILED_PREFIX}${YTDLP_ERROR_MESSAGES.timeout}` })
+    expect(none.analysis.signals?.[3]).toEqual({ kind: 'heatmap', status: 'missing', reason: `${HEATMAP_FAILED_PREFIX}向 YouTube 讀取影片資訊逾時` })
     // the chat replay on disk still counts
     expect(none.analysis.signals?.[2]).toMatchObject({ kind: 'chat', status: 'used' })
   })

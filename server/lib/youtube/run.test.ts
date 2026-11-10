@@ -57,6 +57,19 @@ describe('runYtdlp', () => {
     expect(result.stdout).toBe('')
   })
 
+  it('splits stderr only at \\n / \\r\\n: a lone \\r inside an ERROR line becomes a space (yt-dlp\'s retry errors)', async () => {
+    const command = script(`
+      process.stdout.write('[download]  10.0%\\r[download]  20.0%\\n')
+      process.stderr.write('ERROR: \\r[download] Got error: HTTP Error 403: Forbidden. Giving up after 10 retries\\r\\nERROR: plain\\n')
+      process.exitCode = 1`)
+    const lines: string[] = []
+    const result = await runYtdlp({ command }, [], { onLine: l => lines.push(l) })
+    expect(result.errorLines).toEqual(['ERROR: [download] Got error: HTTP Error 403: Forbidden. Giving up after 10 retries', 'ERROR: plain'])
+    expect(result.tail).toContain('ERROR: [download] Got error: HTTP Error 403: Forbidden. Giving up after 10 retries')
+    // stdout still splits at a lone \r (progress redraws without --newline).
+    expect(lines).toEqual(expect.arrayContaining(['[download]  10.0%', '[download]  20.0%']))
+  })
+
   it('passes the arguments as an array and sets PYTHONUTF8=1', async () => {
     const command = script(`console.log(JSON.stringify({ argv: process.argv.slice(2), utf8: process.env.PYTHONUTF8 }))`)
     const lines: string[] = []

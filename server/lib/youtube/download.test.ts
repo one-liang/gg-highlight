@@ -121,6 +121,8 @@ describe('fetchMetadata', () => {
     [IDS.postLive, 'post-live', '直播剛結束，YouTube 還在處理重播，請過一段時間再加入'],
     [IDS.private, 'private', '這是私人影片，無法下載'],
     [IDS.botCheck, 'blocked', 'YouTube 暫時拒絕這台電腦的連線（被當成機器人或請求太頻繁），請過一段時間再按「重試」'],
+    // A stream that has not started: yt-dlp prints no -J document, only YouTube's reason.
+    [IDS.upcoming, 'live', '還在直播中或還沒開始的直播不能加入，結束後再來'],
   ] as const)('%s → %s', async (id, kind, message) => {
     const error = await caught(fetchMetadata(config, watch(id)))
     expect(error).toBeInstanceOf(YtdlpError)
@@ -179,6 +181,23 @@ describe('fetchMetadata', () => {
     expect(fs.existsSync(stamp)).toBe(false)
   })
 
+  it('an unknown ERROR line → 向 YouTube 讀取影片資訊失敗：<ERROR line> (nothing was being downloaded)', async () => {
+    const command = script('odd.mjs', `console.error('ERROR: [youtube] x: Something new happened'); process.exit(1)`)
+    const error = await caught(fetchMetadata({ ...config, command }, watch(IDS.vodChat)))
+    expect((error as YtdlpError).kind).toBe('unknown')
+    expect((error as YtdlpError).message).toBe('向 YouTube 讀取影片資訊失敗：ERROR: [youtube] x: Something new happened')
+  })
+
+  it('offline → network (502), and the update stamp stays', async () => {
+    const line = 'ERROR: [youtube] ggVodChat01: Unable to download API page: <urlopen error [Errno 11001] getaddrinfo failed> (caused by TransportError(\'<urlopen error [Errno 11001] getaddrinfo failed>\'))'
+    const command = script('offline.mjs', `console.error(${JSON.stringify(line)}); process.exit(1)`)
+    const error = await caught(fetchMetadata({ ...config, command }, watch(IDS.vodChat)))
+    expect((error as YtdlpError).kind).toBe('network')
+    expect((error as YtdlpError).message).toBe('連不到 YouTube 或連線中斷，請確認網路連線後再試')
+    expect((error as YtdlpError).httpStatus).toBe(502)
+    expect(fs.existsSync(stamp)).toBe(true)
+  })
+
   it('a multi-megabyte -J line is read whole', async () => {
     const command = script('big.mjs', `
       const meta = { _type: 'video', id: 'abcdefghijk', title: '大', duration: 10, automatic_captions: { x: 'y'.repeat(3 * 1024 * 1024) } }
@@ -218,6 +237,24 @@ describe('downloadVideo', () => {
     expect((error as YtdlpError).detail).toBe(FAKE_YTDLP_ERRORS.download403)
     expect(fs.existsSync(stamp)).toBe(false)
     expect(fs.existsSync(path.join(config.downloadsDir, 'video-2.f137.mp4.part'))).toBe(true)
+  })
+
+  it('retries used up: the reason after yt-dlp\'s lone \\r stays on the ERROR line (HTTP 403 → outdated)', async () => {
+    const error = await caught(downloadVideo(config, { url: watch(IDS.retryErrors), videoId: 'video-9' }))
+    expect((error as YtdlpError).kind).toBe('outdated')
+    expect((error as YtdlpError).detail).toBe('ERROR: [download] Got error: HTTP Error 403: Forbidden. Giving up after 10 retries')
+  })
+
+  it.each([
+    ['an unknown reason is shown in full', 'HTTP Error 500: Internal Server Error', 'unknown', '下載失敗：ERROR: [download] Got error: HTTP Error 500: Internal Server Error. Giving up after 10 retries'],
+    ['a connection cut off mid-way → network', '1000 bytes read, 999000 more expected', 'network', '連不到 YouTube 或連線中斷，請確認網路連線後再試'],
+  ] as const)('retries used up: %s', async (_, reason, kind, message) => {
+    // Exactly what yt-dlp writes (Windows Python turns only \n into \r\n; the \r before [download] stays).
+    const stderr = `ERROR: \r[download] Got error: ${reason}. Giving up after 10 retries\r\n`
+    const command = script('retry.mjs', `process.stderr.write(${JSON.stringify(stderr)}, () => process.exit(1))`)
+    const error = await caught(downloadVideo({ ...config, command }, { url: watch(IDS.vodChat), videoId: 'video-10' }))
+    expect((error as YtdlpError).kind).toBe(kind)
+    expect((error as YtdlpError).message).toBe(message)
   })
 
   it('without the media file the fake fails → unknown with the raw ERROR line', async () => {
@@ -321,9 +358,18 @@ describe('downloadChat', () => {
     expect(error).toBeInstanceOf(YtdlpError)
     expect((error as YtdlpError).kind).toBe('blocked')
     expect((error as YtdlpError).detail).toBe(FAKE_YTDLP_ERRORS.chat429)
-    expect(chatDownloadFailureReason(error)).toBe(`聊天室重播下載失敗：${(error as YtdlpError).message}`)
+    expect(chatDownloadFailureReason(error)).toBe('聊天室重播下載失敗：YouTube 暫時拒絕這台電腦的連線（被當成機器人或請求太頻繁）')
     expect(fs.statSync(chatPartPath(config.downloadsDir, 'video-3')).size).toBe(0)
     expect(fs.existsSync(chatFilePath(config.downloadsDir, 'video-3'))).toBe(false)
+    expect(fs.existsSync(stamp)).toBe(true)
+  })
+
+  it('retries used up (two ERROR lines with yt-dlp\'s lone \\r): HTTP 429 → blocked', async () => {
+    const error = await caught(downloadChat(config, { url: watch(IDS.retryErrors), videoId: 'video-11', durationSec: 60 }))
+    expect((error as YtdlpError).kind).toBe('blocked')
+    expect((error as YtdlpError).detail).toBe('ERROR: [download] Got error: HTTP Error 429: Too Many Requests. Giving up after 10 retries')
+    // The reason names the cause only: a finished Analysis has no 重試 button (the UI names 只重新找精華片段).
+    expect(chatDownloadFailureReason(error)).toBe('聊天室重播下載失敗：YouTube 暫時拒絕這台電腦的連線（被當成機器人或請求太頻繁）')
     expect(fs.existsSync(stamp)).toBe(true)
   })
 

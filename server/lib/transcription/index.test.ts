@@ -140,6 +140,16 @@ describe('LineSplitter', () => {
     expect(lines).toEqual(['a', 'b', 'c', '', 'd'])
   })
 
+  it('loneCr: false ends lines only at \\n and \\r\\n, keeping a lone \\r inside the line', () => {
+    const lines: string[] = []
+    const splitter = new LineSplitter(l => lines.push(l), { loneCr: false })
+    splitter.push('ERROR: \r[download] Got error: x\r')
+    splitter.push('\nb\rc\n')
+    splitter.push('d\r')
+    splitter.end()
+    expect(lines).toEqual(['ERROR: \r[download] Got error: x', 'b\rc', 'd'])
+  })
+
   it('drops an endless line instead of buffering it forever', () => {
     const { lines, splitter } = collect()
     splitter.push('x'.repeat(2 * 1024 * 1024))

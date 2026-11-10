@@ -48,6 +48,13 @@ export type SignalKind = 'loudness' | 'transcript' | 'chat' | 'heatmap'
 export const TRANSCRIPT_SIGNAL_DISABLED_REASON = '已關閉 AI 讀逐字稿（GG_OLLAMA_URL=off）'
 export const TRANSCRIPT_SIGNAL_EMPTY_REASON = '逐字稿沒有內容'
 
+/**
+ * Starts of the chat / heatmap Signal reasons after a failed chat download or metadata read
+ * (聊天室重播下載失敗：<原因>, 無法取得重播熱度：<原因>): running 只重新找精華片段 tries again.
+ */
+export const CHAT_DOWNLOAD_FAILED_PREFIX = '聊天室重播下載失敗'
+export const HEATMAP_READ_FAILED_PREFIX = '無法取得重播熱度：'
+
 export interface SignalState {
   kind: SignalKind
   /** 'used' = it contributed to the Highlight Score; 'missing' = not available this time (no penalty). */

@@ -456,7 +456,8 @@ describe.skipIf(process.platform === 'win32')('main (fake project)', () => {
       '#!/bin/sh',
       `printf '%s|%s|%s\\n' "$*" "$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR" >> ${JSON.stringify(log)}`,
       'if [ -n "$GG_TEST_UV_FAIL" ]; then echo "error: Failed to fetch" >&2; exit 2; fi',
-      'if [ "$2" = install ]; then mkdir -p "$UV_TOOL_BIN_DIR"; printf \'#!/bin/sh\\n\' > "$UV_TOOL_BIN_DIR/yt-dlp"; echo " + yt-dlp==2026.10.26" >&2; fi',
+      // A runnable yt-dlp: installs are checked with `yt-dlp --version`.
+      'if [ "$2" = install ]; then mkdir -p "$UV_TOOL_BIN_DIR"; printf \'#!/bin/sh\\necho 2026.10.26\\n\' > "$UV_TOOL_BIN_DIR/yt-dlp"; chmod +x "$UV_TOOL_BIN_DIR/yt-dlp"; echo " + yt-dlp==2026.10.26" >&2; fi',
       'if [ "$2" = upgrade ]; then echo "Nothing to upgrade" >&2; fi',
       '',
     ].join('\n'))

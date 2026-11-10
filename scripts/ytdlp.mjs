@@ -17,6 +17,15 @@ export const YTDLP_REQUIREMENT = 'yt-dlp[default,deno]'
 export const INSTALL_ARGS = ['tool', 'install', '--upgrade', YTDLP_REQUIREMENT]
 /** Keeps the settings of the install (a manual nightly install stays on nightly). */
 export const UPGRADE_ARGS = ['tool', 'upgrade', 'yt-dlp']
+/**
+ * Rebuilds the tool environment (from uv's cache when it can). Repairs a yt-dlp whose environment
+ * broke: its launcher keeps the absolute path of the environment's Python, so a moved project folder
+ * or a removed Python breaks it, while `uv tool upgrade` answers "Nothing to upgrade" and
+ * `install --upgrade` leaves it broken.
+ */
+export const REINSTALL_ARGS = ['tool', 'install', '--reinstall', YTDLP_REQUIREMENT]
+/** `yt-dlp --version` after an install or a check the server asked for (the first run may compile .pyc files). */
+export const VERSION_TIMEOUT_MS = 30_000
 export const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
 /** A `uv tool upgrade` was once seen hanging for minutes; a retry finished in seconds. */
 export const UV_TIMEOUT_MS = 180_000
@@ -228,20 +237,55 @@ function failed(o, verb, reason) {
   return { ok: false, action: 'failed', message }
 }
 
+/** Why `yt-dlp --version` failed, in Chinese. */
+export function versionFailure(r, timeoutMs = VERSION_TIMEOUT_MS) {
+  if (r.timedOut) return `${Math.round(timeoutMs / 1000)} 秒內沒有回應`
+  if (r.notFound) return '找不到執行檔'
+  return uvErrorLine(`${r.stderr}\n${r.stdout}`) || r.error || `結束代碼 ${r.code}`
+}
+
+function runVersion(o) {
+  const paths = ytdlpPaths(o.root, o.platform)
+  return o.run(paths.exe, ['--version'], { cwd: o.root, env: o.env, timeoutMs: VERSION_TIMEOUT_MS, platform: o.platform })
+}
+
+/**
+ * After an install, or an upgrade the server asked for (it deletes the stamp after an unknown yt-dlp
+ * failure, which is what a broken environment gives): `yt-dlp --version` must work, else one
+ * `uv tool install --reinstall` and a second check. Resolves with { ok: true, repaired } or the
+ * failure result (no stamp is written then, so the next start checks again).
+ */
+async function verify(o, verb) {
+  const first = await runVersion(o)
+  if (first.ok) return { ok: true, repaired: false }
+  o.log(`▶ yt-dlp 無法執行（${versionFailure(first)}），重新安裝…`)
+  const r = await runUv(o, REINSTALL_ARGS)
+  const fix = '請刪掉專案裡的 tools 資料夾，再雙擊 start.bat 重新安裝（需要網路）'
+  if (!r.ok) return failed(o, verb, `yt-dlp 無法執行，重新安裝也失敗（${failureReason(r, o.timeoutMs)}）；${fix}`)
+  const second = await runVersion(o)
+  if (second.ok) return { ok: true, repaired: true }
+  return failed(o, verb, `重新安裝後 yt-dlp 還是無法執行（${versionFailure(second)}）；${fix}`)
+}
+
+const REPAIRED_MESSAGE = '已重新安裝 yt-dlp（原本的無法執行，例如專案資料夾搬過位置）'
+
 async function doInstall(o) {
   const paths = ytdlpPaths(o.root, o.platform)
   o.log('▶ 安裝 yt-dlp（YouTube 下載工具，只有第一次需要，大約 1 分鐘）…')
   const r = await runUv(o, INSTALL_ARGS)
   if (!r.ok) return failed(o, '安裝', failureReason(r, o.timeoutMs))
   if (!fs.existsSync(paths.exe)) return failed(o, '安裝', `uv 執行完了，但找不到 ${paths.exe}`)
+  const check = await verify(o, '安裝')
+  if (!check.ok) return check
   await writeStamp(paths.stamp, o.now())
   const version = installedVersion(`${r.stderr}\n${r.stdout}`)
-  const message = version ? `已安裝 yt-dlp ${version}` : '已安裝 yt-dlp'
+  const message = check.repaired ? REPAIRED_MESSAGE : version ? `已安裝 yt-dlp ${version}` : '已安裝 yt-dlp'
   o.log(`✅ ${message}`)
   return { ok: true, action: 'installed', message }
 }
 
-async function doUpgrade(o) {
+/** `forceCheck`: the server deleted the stamp, so also make sure yt-dlp still runs (verify). */
+async function doUpgrade(o, forceCheck) {
   const paths = ytdlpPaths(o.root, o.platform)
   o.log('▶ 檢查 yt-dlp 更新…')
   const r = await runUv(o, UPGRADE_ARGS)
@@ -250,9 +294,13 @@ async function doUpgrade(o) {
     if (/is not installed/i.test(`${r.stderr}\n${r.stdout}`)) return doInstall(o)
     return failed(o, '更新', failureReason(r, o.timeoutMs))
   }
+  const check = forceCheck ? await verify(o, '更新') : { ok: true, repaired: false }
+  if (!check.ok) return check
   await writeStamp(paths.stamp, o.now())
   const versions = upgradedVersions(`${r.stderr}\n${r.stdout}`)
-  const message = versions ? `已更新 yt-dlp（${versions[0]} → ${versions[1]}）` : 'yt-dlp 已是最新版'
+  const message = check.repaired
+    ? REPAIRED_MESSAGE
+    : versions ? `已更新 yt-dlp（${versions[0]} → ${versions[1]}）` : 'yt-dlp 已是最新版'
   o.log(`✅ ${message}`)
   return { ok: true, action: 'upgraded', message }
 }
@@ -279,7 +327,8 @@ export async function install(opts = {}) {
 
 /**
  * start.mjs: install when tools/bin has no yt-dlp, upgrade when the last check is older than 24 h
- * (or the server deleted the stamp), else nothing. Prints only when it runs uv. Never throws.
+ * (or the server deleted the stamp: then also check that yt-dlp runs, reinstalling it when not), else
+ * nothing. Installs are always checked. Prints only when it runs uv. Never throws.
  * @param {YtdlpOptions} [opts]
  * @returns {Promise<YtdlpResult>}
  */
@@ -289,7 +338,7 @@ export async function ensure(opts = {}) {
     const plan = await ensurePlan(o)
     if (plan === 'skip') return skipped()
     if (plan === 'install') return await doInstall(o)
-    if (plan === 'upgrade') return await doUpgrade(o)
+    if (plan === 'upgrade') return await doUpgrade(o, (await readStamp(ytdlpPaths(o.root, o.platform).stamp)) === null)
     return { ok: true, action: 'up-to-date', message: '24 小時內已經檢查過 yt-dlp 更新' }
   }
   catch (err) {

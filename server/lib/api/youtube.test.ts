@@ -180,6 +180,24 @@ describe('probeYoutube and addYoutubeVideo', () => {
     expect(calls).toEqual([WATCH_URL])
   })
 
+  it('probe: a video already in the Library is answered from the stored info, without yt-dlp', async () => {
+    const first = stubTools([metadata()])
+    const video = await addYoutubeVideo(deps(first.tools), { youtubeUrl: WATCH_URL, language: 'en' })
+    // The 30-minute cache is gone (restart or expiry) and YouTube now refuses this PC / the video went private.
+    cache = createMetadataCache()
+    for (const failure of [new YtdlpError('blocked', YTDLP_ERROR_MESSAGES.blocked!), new YtdlpError('private', YTDLP_ERROR_MESSAGES.private!)]) {
+      const { tools, calls } = stubTools([failure])
+      expect(await probeYoutube(deps(tools), `https://youtu.be/${ID}?si=x`)).toEqual({
+        ...toYoutubeMeta(metadata()),
+        url: WATCH_URL,
+        title: '測試直播重播',
+        languageHint: null,
+        inLibraryVideoId: video.id,
+      })
+      expect(calls).toEqual([])
+    }
+  })
+
   it('probe: 400 / 422 for bad links without running yt-dlp', async () => {
     const { tools, calls } = stubTools([])
     expect(await rejection(probeYoutube(deps(tools), 'https://example.com/watch?v=dQw4w9WgXcQ'))).toEqual({ statusCode: 400, statusMessage: NOT_YOUTUBE_MESSAGE })

@@ -27,11 +27,12 @@ export type YtdlpErrorKind =
   | 'blocked'
   /** 403, format not available, extraction/signature failures: yt-dlp probably needs an update. */
   | 'outdated'
+  /** Offline, DNS, proxy / TLS failures, a dropped or timed-out connection. */
+  | 'network'
   | 'ffmpeg-missing'
-  | 'js-runtime-missing'
   /** The yt-dlp executable could not be started. */
   | 'not-installed'
-  /** live_status is_live / is_upcoming. */
+  /** live_status is_live, or a stream / premiere that has not started (yt-dlp's "This live event will begin…"). */
   | 'live'
   /** live_status post_live. */
   | 'post-live'

@@ -1,21 +1,23 @@
 // Downloading the video file and the live chat replay (design.md「YouTube」→「下載」).
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { CHAT_DOWNLOAD_FAILED_PREFIX } from '../../../shared/types/domain'
 import { isInside } from '../config'
 import { chatDownloadArgs, chatFilePath, chatPartPath, videoDownloadArgs } from './command'
-import { exitStatusText, mapYtdlpError, noteUpdateHint } from './errors'
+import { exitStatusText, mapYtdlpError, noteUpdateHint, ytdlpErrorCause } from './errors'
 import { DownloadProgress, parseFileLine } from './progress'
 import { logFailure, runYtdlp } from './run'
 import { type DownloadChatOptions, type DownloadVideoOptions, type YtdlpConfig, YtdlpError } from './types'
 
-export const CHAT_FAILED_PREFIX = '聊天室重播下載失敗'
+export const CHAT_FAILED_PREFIX = CHAT_DOWNLOAD_FAILED_PREFIX
 
 /**
  * The chat Signal's missing reason after downloadChat failed (design.md「聊天室密度」step 7):
- * 聊天室重播下載失敗：<error>, without repeating the prefix that downloadChat's 'unknown' errors already have.
+ * 聊天室重播下載失敗：<cause>. The cause has no 「按「重試」」 (a finished Analysis has no such button;
+ * the UI names 只重新找精華片段 instead), and the prefix of downloadChat's 'unknown' errors is not repeated.
  */
 export function chatDownloadFailureReason(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error)
+  const message = error instanceof YtdlpError ? ytdlpErrorCause(error) : error instanceof Error ? error.message : String(error)
   return message.startsWith(CHAT_FAILED_PREFIX) ? message : `${CHAT_FAILED_PREFIX}：${message}`
 }
 /** How often the chat .part is read for progress. */

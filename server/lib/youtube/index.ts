@@ -8,8 +8,8 @@ export {
   CHAT_FAILED_PREFIX, chatDownloadFailureReason, chatLineOffsetMs, downloadChat, downloadVideo, lastChatOffsetMs,
 } from './download'
 export {
-  classifyErrorLine, mapYtdlpError, METADATA_TIMEOUT_MESSAGE, noteUpdateHint, UNKNOWN_ERROR_PREFIX,
-  YTDLP_ERROR_MESSAGES, YTDLP_NOT_FOUND_MESSAGE,
+  classifyErrorLine, mapYtdlpError, METADATA_FAILED_PREFIX, METADATA_TIMEOUT_MESSAGE, noteUpdateHint, UNKNOWN_ERROR_PREFIX,
+  YTDLP_ERROR_CAUSES, YTDLP_ERROR_MESSAGES, YTDLP_NOT_FOUND_MESSAGE, ytdlpErrorCause,
 } from './errors'
 export {
   assertAddable, fetchMetadata, isoUploadDate, languageHintOf, METADATA_TIMEOUT_MS, NOT_VIDEO_MESSAGE, parseMetadata,

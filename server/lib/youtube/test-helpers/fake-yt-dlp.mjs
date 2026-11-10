@@ -20,6 +20,8 @@ export const FAKE_YTDLP_IDS = Object.freeze({
   download403: 'ggDl403Err1',
   slowDownload: 'ggSlowDl001',
   botCheck: 'ggBotCheck1',
+  upcoming: 'ggUpcoming1',
+  retryErrors: 'ggRetryErr1',
 })
 
 export const FAKE_YTDLP_ERRORS = Object.freeze({
@@ -27,6 +29,16 @@ export const FAKE_YTDLP_ERRORS = Object.freeze({
   botCheck: id => `ERROR: [youtube] ${id}: Sign in to confirm you’re not a bot. Use --cookies-from-browser or --cookies for the authentication.`,
   chat429: 'ERROR: Unable to download video subtitles for \'live_chat\': HTTP Error 429: Too Many Requests',
   download403: 'ERROR: unable to download video data: HTTP Error 403: Forbidden',
+  // A stream or premiere that has not started has no formats: yt-dlp fails with YouTube's reason
+  // instead of printing live_status is_upcoming.
+  upcoming: id => `ERROR: [youtube] ${id}: This live event will begin in 3 hours.`,
+  // Retries used up (yt-dlp's downloader: report_error(f'\r[download] Got error: {e}')): the reason
+  // follows a lone \r inside the ERROR line; the chat run wraps it in a second ERROR line.
+  retry403: 'ERROR: \r[download] Got error: HTTP Error 403: Forbidden. Giving up after 10 retries',
+  retryChat429: [
+    'ERROR: \r[download] Got error: HTTP Error 429: Too Many Requests. Giving up after 10 retries',
+    'ERROR: Unable to download video subtitles for \'live_chat\': ERROR: \r[download] Got error: HTTP Error 429: Too Many Requests. Giving up after 10 retries',
+  ],
 })
 
 /** Defaults of the knobs (env var GG_FAKE_YTDLP_<NAME> or argv --fake-<name>=…). */
@@ -34,7 +46,7 @@ export const FAKE_YTDLP_DEFAULTS = Object.freeze({ durationSec: 60, slowMs: 400,
 
 const SCENARIOS = {
   ggVodChat01: { live: 'was_live', chat: true, heatmap: true },
-  ggNoChat001: { live: 'not_live', chat: false, heatmap: true },
+  ggNoChat001: { live: 'not_live', chat: false, heatmap: true, language: 'en-US' },
   ggNoHeat001: { live: 'was_live', chat: true, heatmap: false },
   ggLiveNow01: { live: 'is_live', chat: true, heatmap: false },
   ggPostLive1: { live: 'post_live', chat: true, heatmap: false },
@@ -43,6 +55,8 @@ const SCENARIOS = {
   ggDl403Err1: { live: 'was_live', chat: true, heatmap: true, download403: true },
   ggSlowDl001: { live: 'was_live', chat: true, heatmap: true, slow: true },
   ggBotCheck1: { live: 'was_live', chat: true, heatmap: true, fail: 'botCheck' },
+  ggUpcoming1: { live: 'is_upcoming', chat: true, heatmap: false, fail: 'upcoming' },
+  ggRetryErr1: { live: 'was_live', chat: true, heatmap: true, retryErrors: true },
 }
 
 export function fakeScenario(id) {
@@ -95,7 +109,7 @@ export function fakeMetadata(id, durationSec = FAKE_YTDLP_DEFAULTS.durationSec, 
     webpage_url: url,
     original_url: url,
     thumbnail: `https://i.ytimg.com/vi/${id}/maxresdefault.jpg`,
-    language: 'zh-TW',
+    language: s.language ?? 'zh-TW',
     availability: 'public',
     extractor: 'youtube',
     extractor_key: 'Youtube',
@@ -416,6 +430,16 @@ async function runDownload(ctx) {
     return exit(1)
   }
 
+  if (scenario.retryErrors) {
+    const partial = path.join(home, fillOutput(outputTemplate(opts), meta, 'f137.mp4')) + '.part'
+    fs.writeFileSync(partial, Buffer.from('partial'))
+    emit('137', { status: 'downloading', downloaded_bytes: 7, total_bytes: 70 })
+    out('[download] Got error: HTTP Error 403: Forbidden. Retrying (1/10)...')
+    await sleep(20)
+    err(FAKE_YTDLP_ERRORS.retry403)
+    return exit(1)
+  }
+
   if (!media || !fs.existsSync(media)) {
     err(`ERROR: [fake-yt-dlp] GG_FAKE_YTDLP_MEDIA is not set or does not exist: ${media ?? '(unset)'}`)
     return exit(1)
@@ -485,6 +509,12 @@ async function runChat(ctx) {
   if (scenario.chatFail) {
     fs.closeSync(fs.openSync(partPath, 'a'))
     err(FAKE_YTDLP_ERRORS.chat429)
+    return exit(1)
+  }
+  if (scenario.retryErrors) {
+    fs.closeSync(fs.openSync(partPath, 'a'))
+    out('[download] Got error: HTTP Error 429: Too Many Requests. Retrying fragment 1 (1/10)...')
+    for (const line of FAKE_YTDLP_ERRORS.retryChat429) err(line)
     return exit(1)
   }
   // Like yt-dlp: an existing .part is appended to (the chat download cannot resume).

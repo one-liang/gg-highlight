@@ -2,10 +2,13 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { classifyErrorLine, errorLinesOf, mapYtdlpError, noteUpdateHint, YTDLP_ERROR_MESSAGES } from './errors'
+import { classifyErrorLine, errorLinesOf, mapYtdlpError, METADATA_FAILED_PREFIX, noteUpdateHint, YTDLP_ERROR_CAUSES, YTDLP_ERROR_MESSAGES, ytdlpErrorCause } from './errors'
 import { YtdlpError, type YtdlpErrorKind } from './types'
 
 const E = (text: string) => `ERROR: [youtube] abcdefghijk: ${text}`
+
+const LIVE = '還在直播中或還沒開始的直播不能加入，結束後再來'
+const NETWORK = '連不到 YouTube 或連線中斷，請確認網路連線後再試'
 
 // Every row of design.md「YouTube」's error table, with real or source-derived yt-dlp texts.
 const TABLE: Array<[YtdlpErrorKind, string, string]> = [
@@ -19,6 +22,11 @@ const TABLE: Array<[YtdlpErrorKind, string, string]> = [
   ['geo-blocked', E('The uploader has not made this video available in your country. This video is available in Japan.'), '這支影片在你所在的地區無法觀看'],
   ['geo-blocked', E('This video is not available from your location due to geo restriction'), '這支影片在你所在的地區無法觀看'],
   ['no-recording', E('This live stream recording is not available.'), '這場直播沒有保留重播'],
+  // Upcoming streams and premieres have no formats, so yt-dlp fails with YouTube's playability reason.
+  ['live', E('This live event will begin in 3 hours.'), LIVE],
+  ['live', E('This live event will begin in a few moments.'), LIVE],
+  ['live', E('Premieres in 20 hours'), LIVE],
+  ['live', E('Premiere will begin shortly'), LIVE],
   ['unavailable', E('Video unavailable'), '影片不存在或已被移除'],
   ['unavailable', E('Video unavailable. This video is not available'), '影片不存在或已被移除'],
   ['unavailable', E('This video has been removed for violating YouTube\'s policy on hate speech.'), '影片不存在或已被移除'],
@@ -34,7 +42,14 @@ const TABLE: Array<[YtdlpErrorKind, string, string]> = [
   ['outdated', E('nsig extraction failed: You may experience throttling'), 'YouTube 可能改版了，yt-dlp 需要更新：關掉 gg-highlight 再重新開啟會自動更新，然後按「重試」'],
   ['ffmpeg-missing', 'ERROR: You have requested merging of multiple formats but ffmpeg is not installed. Aborting due to --abort-on-error', '找不到 FFmpeg，請重新執行 setup.bat'],
   ['ffmpeg-missing', 'ERROR: Postprocessing: ffmpeg not found. Please install or provide the path using --ffmpeg-location', '找不到 FFmpeg，請重新執行 setup.bat'],
-  ['js-runtime-missing', E('No supported JavaScript runtime could be found.'), '找不到 yt-dlp 需要的 JavaScript 執行環境，請重新執行 setup.bat'],
+  // Real yt-dlp 2026.10.26 output through an unreachable proxy / a failing TLS check, and Python's texts.
+  ['network', E('Unable to download API page: (\'Unable to connect to proxy\', NewConnectionError(\'<urllib3.connection.HTTPSConnection object at 0x7f>: Failed to establish a new connection: [Errno 111] Connection refused\')) (caused by ProxyError("(\'Unable to connect to proxy\', NewConnectionError(...))")); please report this issue on  https://github.com/yt-dlp/yt-dlp/issues?q= , filling out the appropriate issue template. Confirm you are on the latest version using  yt-dlp -U'), NETWORK],
+  ['network', E('Unable to download API page: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed (_ssl.c:1010) (caused by CertificateVerifyError(\'[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed\'))'), NETWORK],
+  ['network', E('Unable to download webpage: <urlopen error [Errno 11001] getaddrinfo failed> (caused by TransportError(\'<urlopen error [Errno 11001] getaddrinfo failed>\'))'), NETWORK],
+  ['network', 'ERROR: [download] Got error: 1000 bytes read, 999000 more expected. Giving up after 10 retries', NETWORK],
+  ['network', 'ERROR: [download] Got error: (\'Connection aborted.\', ConnectionResetError(10054, \'遠端主機已強制關閉一個現存的連線。\', None, 10054, None)). Giving up after 10 retries', NETWORK],
+  ['network', 'ERROR: [download] Got error: [WinError 10060] 連線嘗試失敗. Giving up after 10 retries', NETWORK],
+  ['network', 'ERROR: [download] Got error: The read operation timed out. Giving up after 10 retries', NETWORK],
 ]
 
 describe('mapYtdlpError: design.md error table', () => {
@@ -45,6 +60,31 @@ describe('mapYtdlpError: design.md error table', () => {
     expect(error.message).toBe(message)
     expect(error.detail).toBe(line)
     expect(classifyErrorLine(line)).toBe(kind)
+  })
+
+  it('more specific rows win over the network row (HTTP 429 / 403 also start with "Unable to download")', () => {
+    expect(classifyErrorLine(E('Unable to download API page: HTTP Error 429: Too Many Requests (caused by <HTTPError 429: Too Many Requests>)'))).toBe('blocked')
+    expect(classifyErrorLine(E('Unable to download webpage: HTTP Error 403: Forbidden (caused by <HTTPError 403: Forbidden>)'))).toBe('outdated')
+    expect(classifyErrorLine('ERROR: [download] Got error: HTTP Error 403: Forbidden. Giving up after 10 retries')).toBe('outdated')
+    // A server error under retries is not a known row: shown with its reason.
+    expect(classifyErrorLine('ERROR: [download] Got error: HTTP Error 500: Internal Server Error. Giving up after 10 retries')).toBe('unknown')
+  })
+
+  it('upcoming and network failures are not "update yt-dlp" hints: 422 / 502 and the stamp stays', () => {
+    const upcoming = mapYtdlpError([E('This live event will begin in 3 hours.')], { code: 1 })
+    expect(upcoming.httpStatus).toBe(422)
+    expect(upcoming.suggestsUpdate).toBe(false)
+    const network = mapYtdlpError([E('Unable to download API page: <urlopen error [Errno 11001] getaddrinfo failed> (caused by TransportError(\'x\'))')], { code: 1 })
+    expect(network.httpStatus).toBe(502)
+    expect(network.suggestsUpdate).toBe(false)
+  })
+
+  it('the priority follows the table order (the earliest row matching any ERROR line wins)', () => {
+    const kinds = (lines: string[]) => mapYtdlpError(lines, { code: 1 }).kind
+    expect(kinds(['ERROR: unable to download video data: HTTP Error 403: Forbidden', E('Video unavailable')])).toBe('outdated')
+    expect(kinds(['ERROR: HTTP Error 429: Too Many Requests', 'ERROR: Postprocessing: ffmpeg not found'])).toBe('ffmpeg-missing')
+    expect(kinds([E('Video unavailable'), E('This live event will begin in 3 hours.')])).toBe('live')
+    expect(kinds([E('Video unavailable'), 'ERROR: [download] Got error: The read operation timed out. Giving up after 10 retries'])).toBe('network')
   })
 
   it('anything else → 下載失敗：<raw ERROR line>', () => {
@@ -73,6 +113,13 @@ describe('mapYtdlpError: design.md error table', () => {
     expect(error.message).toBe('下載失敗：ERROR: second odd thing')
   })
 
+  it('a -J read names what failed: 向 YouTube 讀取影片資訊失敗：<raw ERROR line>', () => {
+    const line = 'ERROR: [youtube] abcdefghijk: Something new happened'
+    expect(mapYtdlpError([line], { code: 1 }, undefined, METADATA_FAILED_PREFIX).message).toBe(`向 YouTube 讀取影片資訊失敗：${line}`)
+    expect(mapYtdlpError([], { code: 1 }, undefined, METADATA_FAILED_PREFIX).message).toBe('向 YouTube 讀取影片資訊失敗：yt-dlp 異常結束（結束碼 1）')
+    expect(mapYtdlpError([E('Private video')], { code: 1 }, undefined, METADATA_FAILED_PREFIX).message).toBe('這是私人影片，無法下載')
+  })
+
   it('without any ERROR line names the exit status, or uses the fallback', () => {
     expect(mapYtdlpError(['some output'], { code: 2 }).message).toBe('下載失敗：yt-dlp 異常結束（結束碼 2）')
     expect(mapYtdlpError([], { code: null, signal: 'SIGKILL' }).message).toBe('下載失敗：yt-dlp 異常結束（被訊號 SIGKILL 終止）')
@@ -89,6 +136,23 @@ describe('mapYtdlpError: design.md error table', () => {
 
   it('every mapped kind has its message', () => {
     for (const [kind] of TABLE) expect(YTDLP_ERROR_MESSAGES[kind]).toBeTruthy()
+  })
+})
+
+describe('ytdlpErrorCause: the reason without an action, for places without a 重試 button', () => {
+  it('drops the 「…按「重試」」 / 請…再試 action of the kinds that have one', () => {
+    expect(ytdlpErrorCause(new YtdlpError('blocked', YTDLP_ERROR_MESSAGES.blocked!))).toBe('YouTube 暫時拒絕這台電腦的連線（被當成機器人或請求太頻繁）')
+    expect(ytdlpErrorCause(new YtdlpError('outdated', YTDLP_ERROR_MESSAGES.outdated!))).toBe('YouTube 可能改版了，yt-dlp 需要更新（關掉 gg-highlight 再重新開啟會自動更新）')
+    expect(ytdlpErrorCause(new YtdlpError('network', YTDLP_ERROR_MESSAGES.network!))).toBe('連不到 YouTube 或連線中斷')
+    expect(ytdlpErrorCause(new YtdlpError('timeout', YTDLP_ERROR_MESSAGES.timeout!))).toBe('向 YouTube 讀取影片資訊逾時')
+    for (const cause of Object.values(YTDLP_ERROR_CAUSES)) expect(cause).not.toMatch(/重試|再試/)
+  })
+
+  it('keeps other messages; an unknown error loses only the generic 下載失敗：', () => {
+    expect(ytdlpErrorCause(new YtdlpError('private', YTDLP_ERROR_MESSAGES.private!))).toBe('這是私人影片，無法下載')
+    expect(ytdlpErrorCause(mapYtdlpError(['ERROR: something new'], { code: 1 }))).toBe('ERROR: something new')
+    expect(ytdlpErrorCause(new YtdlpError('unknown', '向 YouTube 讀取影片資訊失敗：ERROR: x'))).toBe('向 YouTube 讀取影片資訊失敗：ERROR: x')
+    expect(ytdlpErrorCause(new YtdlpError('unknown', '', 'detail'))).toBe('detail')
   })
 })
 
@@ -117,6 +181,8 @@ describe('noteUpdateHint', () => {
     const file = stamp()
     await noteUpdateHint(new YtdlpError('private', 'x'), { updateStampPath: file })
     await noteUpdateHint(new YtdlpError('blocked', 'x'), { updateStampPath: file })
+    await noteUpdateHint(new YtdlpError('network', 'x'), { updateStampPath: file })
+    await noteUpdateHint(new YtdlpError('live', 'x'), { updateStampPath: file })
     await noteUpdateHint(new Error('boom'), { updateStampPath: file })
     await noteUpdateHint(new YtdlpError('outdated', 'x'), { updateStampPath: null })
     expect(fs.existsSync(file)).toBe(true)

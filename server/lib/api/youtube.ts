@@ -96,9 +96,22 @@ function findInLibrary(repos: Repositories, ...ids: string[]): VideoRecord | nul
   return null
 }
 
-/** POST /api/youtube/probe: what the YouTube tab shows before adding. Throws HTTP errors. */
+/** A Library video's YoutubeInfo from what it stored when it was added (no language hint: the form hides it). */
+function storedYoutubeInfo(video: VideoRecord, link: YoutubeLink): YoutubeInfo | null {
+  if (!video.youtube) return null
+  return { ...video.youtube, url: video.youtubeUrl ?? link.url, title: video.title, languageHint: null, inLibraryVideoId: video.id }
+}
+
+/**
+ * POST /api/youtube/probe: what the YouTube tab shows before adding. A video already in the Library is
+ * answered from the stored info without asking YouTube, so 「這支影片已在影片庫」 shows even while YouTube
+ * refuses this PC or the video went private. Throws HTTP errors.
+ */
 export async function probeYoutube(deps: YoutubeApiDeps, url: string): Promise<YoutubeInfo> {
   const link = parseYoutubeLink(url)
+  const existing = findInLibrary(deps.repos, link.id)
+  const stored = existing ? storedYoutubeInfo(existing, link) : null
+  if (stored) return stored
   const meta = await readYoutubeMetadata(deps, link)
   return toYoutubeInfo(meta, findInLibrary(deps.repos, meta.id, link.id)?.id ?? null)
 }

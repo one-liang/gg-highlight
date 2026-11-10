@@ -32,8 +32,13 @@ const Z_TO = 6
 const GREETING_MAX_CHARS = 12
 /** Latin tokens match as whole words (no ASCII letter or digit right before or after). */
 const word = (alternatives: string) => `(?<![a-z0-9])(?:${alternatives})(?![a-z0-9])`
+/**
+ * Greeting / farewell tokens. Three are narrowed so common reactions do not read as greetings:
+ * 主播好 only when followed by the end, punctuation, a space, an emoji or a sentence particle (not
+ * 主播好猛／主播好扯／主播好強), 嗨 not in 好嗨 or 嗨起來, 安安 not in 安安靜靜.
+ */
 const GREETING = new RegExp(
-  `晚安|晚上好|午安|早安|安安|哈囉|嗨|大家好|主播好|掰掰|拜拜|下播|辛苦了|報到|👋|:hand-pink-waving:|${word('hi|hello|bye|8{2,}')}`,
+  `晚安|晚上好|午安|早安|安安(?!靜)|哈囉|(?<!好)嗨(?!起來)|大家好|主播好(?=$|[^\\p{L}\\p{N}]|[啊呀喔哦唷耶])|掰掰|拜拜|下播|辛苦了|報到|👋|:hand-pink-waving:|${word('hi|hello|bye|8{2,}')}`,
   'iu',
 )
 const REACTION = new RegExp(

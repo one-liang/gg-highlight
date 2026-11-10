@@ -23,6 +23,7 @@ import {
   needsHighlightsUpgrade,
   REDOWNLOAD_NEXT_STEP,
   REFILL_TRANSCRIPT_HINT,
+  RETRY_YOUTUBE_SIGNAL_HINT,
   reanalyzeOptions,
   reanalyzeStartedNotice,
   summarizeSignals,
@@ -206,6 +207,22 @@ describe('summarizeSignals', () => {
     expect(summarizeSignals([noLoudness, transcript])!.notes[0]!.text).toBe('音量沒有用到：找不到原始影片檔')
   })
 
+  it('names 只重新找精華片段 after a failed chat download or heatmap read, not when the video has none', () => {
+    expect(RETRY_YOUTUBE_SIGNAL_HINT).toBe('；之後按「重新分析」→「只重新找精華片段」會再試一次')
+    const chatFailed: SignalState = { kind: 'chat', status: 'missing', reason: '聊天室重播下載失敗：YouTube 暫時拒絕這台電腦的連線（被當成機器人或請求太頻繁）' }
+    const heatmapFailed: SignalState = { kind: 'heatmap', status: 'missing', reason: '無法取得重播熱度：向 YouTube 讀取影片資訊逾時' }
+    expect(summarizeSignals([loudness, chatFailed, heatmapFailed])!.notes.map(n => n.text)).toEqual([
+      `聊天室沒有用到：聊天室重播下載失敗：YouTube 暫時拒絕這台電腦的連線（被當成機器人或請求太頻繁）${RETRY_YOUTUBE_SIGNAL_HINT}`,
+      `重播熱度沒有用到：無法取得重播熱度：向 YouTube 讀取影片資訊逾時${RETRY_YOUTUBE_SIGNAL_HINT}`,
+    ])
+    const noChat: SignalState = { kind: 'chat', status: 'missing', reason: '這支影片沒有聊天室重播（不是直播重播，或重播剪輯過）' }
+    const noHeatmap: SignalState = { kind: 'heatmap', status: 'missing', reason: '這支影片沒有 YouTube 重播熱度（觀看次數不夠多或影片太新）' }
+    const tooFew: SignalState = { kind: 'chat', status: 'missing', reason: '聊天室訊息太少（平均每分鐘不到 2 則），不採用' }
+    for (const s of [noChat, noHeatmap, tooFew]) {
+      expect(summarizeSignals([loudness, s])!.notes[0]!.text).not.toContain('只重新找精華片段')
+    }
+  })
+
   it('notes a caveat of a used Signal', () => {
     const partial: SignalState = { kind: 'transcript', status: 'used', reason: '2 個區段讀取失敗' }
     expect(summarizeSignals([loudness, partial])).toEqual({
@@ -361,9 +378,10 @@ describe('analysisProgressText', () => {
   it('names the download step and the YouTube Signals', () => {
     expect(analysisProgressText({ ...v({ status: 'running', step: 'download' }), sourceKind: 'youtube' })).toMatchObject({
       title: '正在下載影片',
-      hint: '正在從 YouTube 下載影片（最高 1080p）',
+      hint: DOWNLOAD_HINT,
     })
-    expect(DOWNLOAD_HINT).toBe('正在從 YouTube 下載影片（最高 1080p）')
+    // The step also reads the metadata and the chat, and with the file on disk downloads no video at all.
+    expect(DOWNLOAD_HINT).toBe('正在向 YouTube 讀取影片資訊，需要時下載影片檔（最高 1080p）與聊天室重播')
     expect(analysisProgressText({ ...v({ status: 'running', step: 'signals' }), sourceKind: 'youtube' }).title).toBe('正在分析音量、逐字稿、聊天室與重播熱度')
     expect(analysisProgressText({ ...v({ status: 'running', step: 'signals' }), sourceKind: 'upload' }).title).toBe('正在分析音量與逐字稿')
   })

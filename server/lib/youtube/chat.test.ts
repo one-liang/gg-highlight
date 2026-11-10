@@ -68,6 +68,11 @@ describe('messageWeight', () => {
     [`晚安${':hand-pink-waving:'.repeat(5)}`, 0], // shortcuts do not count toward the 12
     ['晚安，今天這場打得真的很精彩喔', 1], // long: a real message
     ['晚安 今天真的笑死我了這場超好看', 2],
+    // 主播好 is a greeting only when nothing but punctuation, an emoji or a particle follows it
+    ['主播好～', 0], ['主播好!!', 0], ['主播好啊', 0], ['主播好 今天玩什麼', 0], ['主播好👋', 0],
+    ['主播好猛', 2], ['主播好扯', 2], ['主播好猛!!!', 2], ['太神了主播好猛', 2], ['主播好強', 1], ['主播好帥', 1],
+    // 嗨 in 好嗨 / 嗨起來 and 安安 in 安安靜靜 are not greetings
+    ['好嗨喔', 1], ['嗨起來', 1], ['安安靜靜', 1], ['嗨嗨', 0],
     // Reactions → 2
     ['笑死', 2], ['笑爛', 2], ['笑翻了', 2], ['哈哈', 2], ['哈哈哈哈哈', 2], ['草', 2], ['www', 2], ['WWWWW', 2],
     ['XD', 2], ['xDDD', 2], ['lol', 2], ['LMAO', 2], ['kekw', 2], ['🤣', 2], ['😂😂', 2], ['？？', 2], ['??', 2],

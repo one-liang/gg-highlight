@@ -137,8 +137,9 @@
 分析的第一步是下載：
 
 - **影片檔**：最高 1080p，選瀏覽器能直接播的 H.264＋AAC（mp4），所以預覽與輸出剪輯都不用轉檔；代價是檔案比較大（3 小時的 1080p 直播約 4–8 GB）。檔案存在 `data/downloads/`，**一直保留到你把影片從影片庫移除**。
-- **聊天室重播**（有的話）：另外下載到 `data/downloads/`。下載失敗只會讓聊天室密度這次沒用到，分析照常進行。
-- 下載到一半關掉程式時，下次啟動會自動接著下載；按「取消」的話，已下載的部分會留著，之後按「重試」會接著下載。
+- **聊天室重播**（有的話）：另外下載到 `data/downloads/`。下載失敗只會讓聊天室密度這次沒用到，分析照常進行；之後按「重新分析」→「只重新找精華片段」會再下載一次。
+- 下載到一半關掉程式時，下次啟動會自動接著下載。要中途停止下載只能把影片從影片庫移除（下載到一半的檔案也會一起刪掉）。
+- 下載失敗（例如網路斷掉）時按「重試」，會從已下載的部分接著下載。
 - 下載的影片檔被手動刪掉時：「只重新找精華片段」照常可用；「重新辨識語音並找精華」會重新下載（你改過的逐字稿會被覆蓋）；預覽與輸出剪輯要等重新下載。
 
 ### 聊天室密度與重播熱度
@@ -164,6 +165,9 @@ YouTube 影片多了兩種訊號（見「自動找精華」）。「這次的候
 | --- | --- |
 | 「YouTube 暫時拒絕這台電腦的連線（被當成機器人或請求太頻繁）」 | YouTube 會擋短時間內讀取太多影片的電腦（`Sign in to confirm you’re not a bot`、`HTTP Error 429`）。等一段時間（通常一小時以上）再按「重試」，不要一直重試。 |
 | 「YouTube 可能改版了，yt-dlp 需要更新」 | YouTube 改版後舊版 yt-dlp 會下載失敗。關掉 gg-highlight（關閉黑色視窗）再雙擊 `start.bat`，啟動時會自動更新 yt-dlp，然後按「重試」。更新後還是不行，見下面的「換成 nightly 版」。 |
+| 「連不到 YouTube 或連線中斷，請確認網路連線後再試」 | 電腦沒有連上網路、DNS 或 Proxy 有問題，或下載途中連線斷掉。確認網路之後按「重試」（下載會從已下載的部分接著來）。 |
+| 「聊天室重播下載失敗：…」「無法取得重播熱度：…」 | 這次分析沒用到聊天室或重播熱度，其他訊號照常。原因排除後（例如過一段時間、網路恢復），按「重新分析」→「只重新找精華片段」會再試一次，不用重新辨識語音。 |
+| 搬移專案資料夾後 YouTube 不能用（「yt-dlp 異常結束」） | 程式管理的 yt-dlp 記的是安裝時的位置。關掉 gg-highlight 再雙擊 `start.bat`：失敗過一次之後，啟動時會檢查 yt-dlp 能不能執行，不能就自動重新安裝。還是不行就刪掉專案裡的 `tools` 資料夾，再雙擊 `start.bat`。 |
 | 啟動時顯示「無法更新 yt-dlp（只影響 YouTube）」或「無法安裝 yt-dlp」 | 通常是網路連不到 PyPI（pypi.org）。其他功能照常可用，下次啟動會再試；寫「找不到 uv」時請重新執行 `setup.bat`。 |
 | 「找不到 yt-dlp，請重新執行 setup.bat」 | 重新執行 `setup.bat`，或直接雙擊 `start.bat`（`tools/` 裡沒有 yt-dlp 時會自動安裝）。`node scripts\doctor.mjs` 會顯示 yt-dlp 的狀態。 |
 | 「這支影片沒有聊天室重播」「聊天室訊息太少」「沒有 YouTube 重播熱度」 | 不是錯誤，見上面的「聊天室密度與重播熱度」。少了這些訊號，一樣用音量與逐字稿找精華。 |
@@ -257,7 +261,7 @@ pnpm 的設定放在 `pnpm-workspace.yaml`（pnpm 11 起不讀 `package.json` �
 其他腳本：
 
 - `node scripts/doctor.mjs [--json]`：環境檢查；`--json` 輸出機器可讀的結果。必要項目沒通過時結束代碼是 1（Ollama、NVENC、yt-dlp 這類選用項目只會提醒）。
-- `node scripts/ytdlp.mjs install|ensure`：程式自己管理的 yt-dlp（`uv tool`，`UV_TOOL_DIR=tools/uv`、`UV_TOOL_BIN_DIR=tools/bin`）。`install` 安裝或更新（setup.bat）；`ensure` 沒有就安裝、超過 24 小時沒檢查就 `uv tool upgrade yt-dlp`（`start.mjs` 在伺服器啟動前執行；伺服器遇到「可能改版了」的錯誤時會刪掉 `tools/.yt-dlp-checked`，下次啟動就一定檢查）。設定了 `GG_YTDLP_CMD` 時兩者都不做事。
+- `node scripts/ytdlp.mjs install|ensure`：程式自己管理的 yt-dlp（`uv tool`，`UV_TOOL_DIR=tools/uv`、`UV_TOOL_BIN_DIR=tools/bin`）。`install` 安裝或更新（setup.bat）；`ensure` 沒有就安裝、超過 24 小時沒檢查就 `uv tool upgrade yt-dlp`（`start.mjs` 在伺服器啟動前執行；伺服器遇到「可能改版了」或不明的 yt-dlp 錯誤時會刪掉 `tools/.yt-dlp-checked`，下次啟動就一定檢查，並確認 `yt-dlp --version` 能執行，不能就 `uv tool install --reinstall`；`install` 也會確認）。設定了 `GG_YTDLP_CMD` 時兩者都不做事。
 - `node scripts/fetch-fonts.mjs [--force] [--no-download]`：取得字幕字型（下載 → 複製系統已安裝的 Noto Sans CJK → 提示手動下載）。
 - `scripts/setup.ps1`：setup.bat 呼叫的 PowerShell 安裝腳本。
 
@@ -265,7 +269,7 @@ pnpm 的設定放在 `pnpm-workspace.yaml`（pnpm 11 起不讀 `package.json` �
 
 Ollama 在測試裡一律用假的 HTTP 伺服器（`server/lib/llm/test-helpers/fake-ollama.mjs`，可以模擬正常、沒有模型、連不到、回應壞掉、卡住）：自己寫的測試要把 `GG_OLLAMA_URL` 指到假的伺服器或設成 `off`，不要連到真的 Ollama。真的模型效果要在有 Ollama 的電腦上確認。
 
-yt-dlp 在測試裡也一律用假的（`server/lib/youtube/test-helpers/fake-yt-dlp.mjs`，由 `GG_YTDLP_CMD` 指定）：依連結裡的影片 ID 決定情境（直播重播含聊天室與重播熱度、沒有聊天室、沒有重播熱度、直播中、私人影片、聊天室下載失敗、下載 403、下載很慢），下載時複製 `GG_FAKE_YTDLP_MEDIA` 指定的測試影片並印出進度。自己寫的測試一定要設定 `GG_YTDLP_CMD`，不要連到 YouTube；`scripts/ytdlp.mjs` 的測試也只用假的 uv。真的下載要在使用者的電腦上確認（雲端環境的 IP 會被 YouTube 擋）。
+yt-dlp 在測試裡也一律用假的（`server/lib/youtube/test-helpers/fake-yt-dlp.mjs`，由 `GG_YTDLP_CMD` 指定）：依連結裡的影片 ID 決定情境（直播重播含聊天室與重播熱度、沒有聊天室（英文影片）、沒有重播熱度、直播中、還沒開始的直播、私人影片、聊天室下載失敗、下載 403、重試用完、下載很慢），下載時複製 `GG_FAKE_YTDLP_MEDIA` 指定的測試影片並印出進度。自己寫的測試一定要設定 `GG_YTDLP_CMD`，不要連到 YouTube；`scripts/ytdlp.mjs` 的測試也只用假的 uv。真的下載要在使用者的電腦上確認（雲端環境的 IP 會被 YouTube 擋）。
 
 設計與用語：[docs/design.md](docs/design.md)（產品行為、資料夾、API）、[GLOSSARY.md](GLOSSARY.md)（用語）、[docs/adr/](docs/adr/)（架構決定）。
 

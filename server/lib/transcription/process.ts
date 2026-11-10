@@ -40,17 +40,24 @@ export function isAbortError(err: unknown): boolean {
   return err instanceof Error && err.name === 'AbortError'
 }
 
-/** Splits a byte stream into lines; UTF-8 safe across chunks; accepts \n, \r\n and lone \r. */
+/** Splits a byte stream into lines; UTF-8 safe across chunks; accepts \n, \r\n and (unless `loneCr: false`) lone \r. */
 export class LineSplitter {
   private readonly decoder = new StringDecoder('utf8')
   private pending = ''
+  private readonly separator: RegExp
 
-  constructor(private readonly onLine: (line: string) => void) {}
+  /**
+   * `loneCr: false` keeps a lone \r inside the line (yt-dlp's stderr: its "ERROR: \r[download] Got error:
+   * …" lines would otherwise lose their reason to a line of its own).
+   */
+  constructor(private readonly onLine: (line: string) => void, options: { loneCr?: boolean } = {}) {
+    this.separator = options.loneCr === false ? /\r\n|\n/ : /\r\n|\n|\r(?!$)/
+  }
 
   push(chunk: Buffer | string): void {
     this.pending += typeof chunk === 'string' ? chunk : this.decoder.write(chunk)
     // A trailing \r may be the first half of \r\n, so it stays pending.
-    const parts = this.pending.split(/\r\n|\n|\r(?!$)/)
+    const parts = this.pending.split(this.separator)
     this.pending = parts.pop() ?? ''
     if (this.pending.length > MAX_LINE_CHARS) this.pending = ''
     for (const part of parts) this.onLine(part)
@@ -153,6 +160,8 @@ export interface CliRunOptions {
   errorOf?: (line: string) => string | null
   /** Every complete stderr line (stderr is still kept as CliResult.stderr's tail). */
   onStderrLine?: (line: string) => void
+  /** false: a lone \r does not end a stderr line (only \n and \r\n do). Default true (tqdm redraws). */
+  stderrLoneCr?: boolean
   /** Raw stdout chunks, e.g. one JSON document too long for the line splitter. */
   onStdoutData?: (chunk: Buffer) => void
   /** Start-failure and abort texts; missing ones are the transcriber's (TRANSCRIBER_CLI_MESSAGES). */
@@ -209,7 +218,7 @@ export function runCli(command: string[], args: string[], opts: CliRunOptions = 
           catch (err) {
             console.warn('[cli] stderr line handler failed:', err)
           }
-        })
+        }, { loneCr: opts.stderrLoneCr })
       : null
     // Raw-stdout callers that want no lines skip the splitter (it drops lines longer than 1 MiB anyway).
     const splitStdout = !opts.onStdoutData || !!opts.onLine || !!opts.errorOf

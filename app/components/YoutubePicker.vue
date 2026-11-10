@@ -88,6 +88,7 @@ onBeforeUnmount(() => {
       icon="i-lucide-circle-alert"
       title="無法讀取影片資訊"
       :description="error"
+      :actions="[{ label: '重試', icon: 'i-lucide-refresh-cw', color: 'error', variant: 'outline', onClick: probe }]"
       data-testid="youtube-probe-error"
     />
 

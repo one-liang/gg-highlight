@@ -72,6 +72,7 @@ describe('CLI', () => {
   it.each([
     [IDS.private, FAKE_YTDLP_ERRORS.private(IDS.private)],
     [IDS.botCheck, FAKE_YTDLP_ERRORS.botCheck(IDS.botCheck)],
+    [IDS.upcoming, `ERROR: [youtube] ${IDS.upcoming}: This live event will begin in 3 hours.`],
   ])('%s: -J fails with its ERROR line', (id, line) => {
     const result = run(['-J', watch(id)])
     expect(result.code).toBe(1)
@@ -102,6 +103,18 @@ describe('CLI', () => {
     expect(lines.at(-1)).toBe(`GGFILE ${JSON.stringify(path.join(out, 'vid.mp4'))}`)
     expect(fs.readFileSync(path.join(out, 'vid.mp4')).equals(fs.readFileSync(media))).toBe(true)
     expect(result.stderr).toMatch(/^WARNING: /)
+  })
+
+  it('ggRetryErr1: video and chat runs fail like yt-dlp after its retries (a lone \\r inside each ERROR line)', () => {
+    const video = run(['-P', dir, '-o', 'v.%(ext)s', '--', watch(IDS.retryErrors)])
+    expect(video.code).toBe(1)
+    expect(video.stderr).toContain('ERROR: \r[download] Got error: HTTP Error 403: Forbidden. Giving up after 10 retries\n')
+    expect(fs.existsSync(path.join(dir, 'v.f137.mp4.part'))).toBe(true)
+    const chat = run(['--skip-download', '--write-subs', '--sub-langs', 'live_chat', '-P', dir, '-o', 'v.%(ext)s', '--', watch(IDS.retryErrors)])
+    expect(chat.code).toBe(1)
+    expect(chat.stderr.split('\n').filter(l => l.startsWith('ERROR: '))).toEqual(FAKE_YTDLP_ERRORS.retryChat429)
+    expect(FAKE_YTDLP_ERRORS.retryChat429.every(l => l.includes('\r'))).toBe(true)
+    expect(fs.existsSync(path.join(dir, 'v.live_chat.json'))).toBe(false)
   })
 
   it('a video without chat writes no chat file and exits 0', () => {
@@ -162,6 +175,8 @@ describe('scenarios', () => {
     expect('heatmap' in noHeat).toBe(false)
     expect(parseMetadata(noHeat)).toMatchObject({ heatmap: null, chatAvailable: true })
     expect(fakeMetadata(IDS.noChat).subtitles).toEqual({})
+    // ggNoChat001 is in English, so the language preselect is visible in the UI tests.
+    expect(parseMetadata(fakeMetadata(IDS.noChat)).languageHint).toBe('en')
   })
 })
 

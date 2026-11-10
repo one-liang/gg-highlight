@@ -4,6 +4,8 @@ import {
   type AnalysisMode,
   type AnalysisState,
   CANCELLED_MESSAGE,
+  CHAT_DOWNLOAD_FAILED_PREFIX,
+  HEATMAP_READ_FAILED_PREFIX,
   type Highlight,
   type SignalKind,
   type SignalState,
@@ -158,6 +160,14 @@ function signalRank(kind: SignalKind): number {
 
 /** What to do once the cause of a missing transcript Signal is fixed. */
 export const REFILL_TRANSCRIPT_HINT = '；處理好之後按「重新分析」→「只重新找精華片段」'
+/** Next step after a failed chat download or heatmap read: 只重新找精華片段 downloads / reads again. */
+export const RETRY_YOUTUBE_SIGNAL_HINT = '；之後按「重新分析」→「只重新找精華片段」會再試一次'
+
+/** A chat / heatmap Signal missing because the download or read failed (not because the video has none). */
+function youtubeSignalRetryable(s: SignalState, reason: string): boolean {
+  return (s.kind === 'chat' && reason.startsWith(CHAT_DOWNLOAD_FAILED_PREFIX))
+    || (s.kind === 'heatmap' && reason.startsWith(HEATMAP_READ_FAILED_PREFIX))
+}
 
 /**
  * 「這次的候選依據」: the used Signals and a note per missing one (with its reason, and the next step
@@ -172,7 +182,9 @@ export function summarizeSignals(signals: readonly SignalState[] | null | undefi
     const label = signalLabels[s.kind] ?? s.kind
     const reason = s.reason?.trim()
     if (s.status === 'missing') {
-      const next = s.kind === 'transcript' && transcriptSignalFixable([s]) ? REFILL_TRANSCRIPT_HINT : ''
+      const next = s.kind === 'transcript' && transcriptSignalFixable([s])
+        ? REFILL_TRANSCRIPT_HINT
+        : youtubeSignalRetryable(s, reason ?? '') ? RETRY_YOUTUBE_SIGNAL_HINT : ''
       notes.push({ kind: s.kind, missing: true, text: `${label}沒有用到${reason ? `：${reason}` : ''}${next}` })
     }
     else if (reason) notes.push({ kind: s.kind, missing: false, text: `${label}：${reason}` })
@@ -303,7 +315,7 @@ export interface ProgressText {
 }
 
 /** Progress hint of the download step (design.md「YouTube」→「下載」). */
-export const DOWNLOAD_HINT = '正在從 YouTube 下載影片（最高 1080p）'
+export const DOWNLOAD_HINT = '正在向 YouTube 讀取影片資訊，需要時下載影片檔（最高 1080p）與聊天室重播'
 
 /** Texts of the progress card, by mode, step and source. */
 export function analysisProgressText(video: WithAnalysis & WithSource): ProgressText {

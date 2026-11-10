@@ -16,11 +16,13 @@ import {
   installedVersion,
   main,
   readStamp,
+  REINSTALL_ARGS,
   runProcess,
   UPGRADE_ARGS,
   upgradedVersions,
   uvEnv,
   uvErrorLine,
+  VERSION_TIMEOUT_MS,
   ytdlpPaths,
 } from './ytdlp.mjs'
 
@@ -71,17 +73,23 @@ async function putStamp(time: number | string) {
 
 /**
  * Fake uv: records calls and answers from a queue. `createExe` makes a successful install drop the
- * executable, like uv does.
+ * executable, like uv does. `yt-dlp --version` runs answer from `versions` (default: it works) and are
+ * recorded in `checks`, not in `calls`.
  */
-function fakeUv(results: RunResult[], { createExe = true } = {}) {
+function fakeUv(results: RunResult[], { createExe = true, versions = [] as RunResult[] } = {}) {
   const calls: Call[] = []
+  const checks: Call[] = []
   const run = async (command: string, args: string[], opts: Call['opts']) => {
+    if (command === paths().exe) {
+      checks.push({ command, args, opts })
+      return versions.shift() ?? ok('2026.10.26\n')
+    }
     calls.push({ command, args, opts })
     const result = results.shift() ?? missing
     if (createExe && result.ok && args[1] === 'install') await putExe()
     return result
   }
-  return { run, calls }
+  return { run, calls, checks }
 }
 
 function opts(run: unknown, extra: Record<string, unknown> = {}) {
@@ -220,6 +228,49 @@ describe('ensure', () => {
     expect(await readStamp(paths().stamp)).toBe(NOW)
   })
 
+  it('a scheduled upgrade (stale stamp) does not run yt-dlp; one the server asked for (no stamp) checks it runs', async () => {
+    await putExe()
+    await putStamp(NOW - CHECK_INTERVAL_MS - 1)
+    const scheduled = fakeUv([ok('', 'Nothing to upgrade\n')])
+    await ensure(opts(scheduled.run).options)
+    expect(scheduled.checks).toEqual([])
+
+    await fs.rm(paths().stamp)
+    const asked = fakeUv([ok('', 'Nothing to upgrade\n')])
+    expect(await ensure(opts(asked.run).options)).toEqual({ ok: true, action: 'upgraded', message: 'yt-dlp 已是最新版' })
+    expect(asked.checks.map(c => c.args)).toEqual([['--version']])
+    expect(asked.checks[0]!.opts.timeoutMs).toBe(VERSION_TIMEOUT_MS)
+  })
+
+  it('repairs a yt-dlp that no longer runs (project folder moved): uv says "Nothing to upgrade", so it reinstalls', async () => {
+    await putExe()
+    const broken = failed('exec: /old/place/tools/uv/yt-dlp/bin/python: not found', 127)
+    const uv = fakeUv([ok('', 'Nothing to upgrade\n'), ok('', INSTALL_OUTPUT)], { versions: [broken] })
+    const { options, lines } = opts(uv.run)
+    expect(await ensure(options)).toEqual({ ok: true, action: 'upgraded', message: '已重新安裝 yt-dlp（原本的無法執行，例如專案資料夾搬過位置）' })
+    expect(uv.calls.map(c => c.args)).toEqual([UPGRADE_ARGS, REINSTALL_ARGS])
+    expect(REINSTALL_ARGS).toEqual(['tool', 'install', '--reinstall', 'yt-dlp[default,deno]'])
+    expect(uv.calls[1]!.opts.env).toMatchObject({ UV_TOOL_DIR: paths().uvToolDir, UV_TOOL_BIN_DIR: paths().binDir })
+    expect(uv.checks).toHaveLength(2)
+    expect(lines).toContain('▶ yt-dlp 無法執行（exec: /old/place/tools/uv/yt-dlp/bin/python: not found），重新安裝…')
+    expect(await readStamp(paths().stamp)).toBe(NOW)
+  })
+
+  it('warns, without a stamp, when yt-dlp still does not run after the reinstall', async () => {
+    await putExe()
+    const broken = failed('exec: python: not found', 127)
+    const uv = fakeUv([ok('', 'Nothing to upgrade\n'), ok('', INSTALL_OUTPUT)], { versions: [broken, broken] })
+    const { options, lines } = opts(uv.run)
+    const result = await ensure(options)
+    expect(result).toEqual({
+      ok: false,
+      action: 'failed',
+      message: '無法更新 yt-dlp（只影響 YouTube）：重新安裝後 yt-dlp 還是無法執行（exec: python: not found）；請刪掉專案裡的 tools 資料夾，再雙擊 start.bat 重新安裝（需要網路）',
+    })
+    expect(lines.at(-1)).toBe(`⚠️ ${result.message}`)
+    expect(existsSync(paths().stamp)).toBe(false)
+  })
+
   it('is up to date, silently and without running uv, when checked within 24 hours', async () => {
     await putExe()
     await putStamp(NOW - 60_000)
@@ -297,6 +348,28 @@ describe('install (setup.bat)', () => {
     expect(uv.calls.map(c => c.args)).toEqual([INSTALL_ARGS])
     expect(await readStamp(paths().stamp)).toBe(NOW + 1000)
     expect(lines.at(-1)).toBe('✅ 已安裝 yt-dlp')
+  })
+
+  it('checks that the installed yt-dlp runs; a broken one is reinstalled, a failed reinstall warns', async () => {
+    const good = fakeUv([ok('', INSTALL_OUTPUT)])
+    expect(await install(opts(good.run).options)).toMatchObject({ ok: true, action: 'installed', message: '已安裝 yt-dlp 2026.10.26' })
+    expect(good.checks).toHaveLength(1)
+
+    await fs.rm(paths().stamp)
+    const repaired = fakeUv([ok('', INSTALL_OUTPUT), ok('', INSTALL_OUTPUT)], { versions: [timedOut] })
+    const { options, lines } = opts(repaired.run)
+    expect(await install(options)).toMatchObject({ ok: true, action: 'installed', message: '已重新安裝 yt-dlp（原本的無法執行，例如專案資料夾搬過位置）' })
+    expect(repaired.calls.map(c => c.args)).toEqual([INSTALL_ARGS, REINSTALL_ARGS])
+    expect(lines).toContain(`▶ yt-dlp 無法執行（${VERSION_TIMEOUT_MS / 1000} 秒內沒有回應），重新安裝…`)
+
+    await fs.rm(paths().stamp)
+    const offline = fakeUv([ok('', INSTALL_OUTPUT), failed('error: Failed to fetch')], { versions: [failed('boom', 1)] })
+    expect(await install(opts(offline.run).options)).toMatchObject({
+      ok: false,
+      action: 'failed',
+      message: expect.stringMatching(/^無法安裝 yt-dlp（只影響 YouTube）：yt-dlp 無法執行，重新安裝也失敗（uv 執行失敗：Failed to fetch）；請刪掉專案裡的 tools 資料夾/),
+    })
+    expect(existsSync(paths().stamp)).toBe(false)
   })
 
   it('does nothing with GG_YTDLP_CMD and says so', async () => {

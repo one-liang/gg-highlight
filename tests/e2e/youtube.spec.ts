@@ -153,7 +153,7 @@ test('YouTube link: probe, download and analyse with chat and heatmap, duplicate
   expect(downloadsOf(video.id)).toEqual([])
 })
 
-test('YouTube link errors: playlist, not YouTube, private video, live stream', async ({ page }, testInfo) => {
+test('YouTube link errors: playlist, not YouTube, private video, live and upcoming streams; English preselect', async ({ page }, testInfo) => {
   await page.goto('/')
   const dialog = await openYoutubeTab(page)
   const input = dialog.getByTestId('youtube-url-input')
@@ -181,11 +181,27 @@ test('YouTube link errors: playlist, not YouTube, private video, live stream', a
   await expect(probeError).toContainText('這是私人影片，無法下載')
   await expect(dialog.getByTestId('youtube-preview')).toHaveCount(0)
   await shot(page, testInfo, 'm3-youtube-private')
+  // the error texts say 按「重試」: the alert has that button, and it reads the link again
+  const reprobe = page.waitForResponse(res => res.request().method() === 'POST' && new URL(res.url()).pathname === '/api/youtube/probe')
+  await probeError.getByRole('button', { name: '重試' }).click()
+  expect((await reprobe).status()).toBe(422)
+  await expect(probeError).toContainText('這是私人影片，無法下載')
 
   await probe(dialog, `https://www.youtube.com/live/${ids.liveNow}`)
   await expect(probeError).toContainText('還在直播中或還沒開始的直播不能加入，結束後再來')
   await expect(probeError).not.toContainText('私人影片')
   await expect(dialog.getByTestId('youtube-preview')).toHaveCount(0)
+
+  // a stream that has not started (yt-dlp reports it as an ERROR line, not as live_status)
+  await probe(dialog, watchUrl(ids.upcoming))
+  await expect(probeError).toContainText('還在直播中或還沒開始的直播不能加入，結束後再來')
+  await expect(probeError).not.toContainText('ERROR')
+
+  // an English video preselects English (the other fake videos are zh-TW, like the default)
+  await probe(dialog, watchUrl(ids.noChat))
+  await expect(dialog.getByTestId('youtube-preview')).toBeVisible()
+  await expect(dialog.getByRole('radio', { name: 'English' })).toBeChecked()
+  await expect(dialog.getByRole('radio', { name: '中文（含中英夾雜）' })).not.toBeChecked()
 
   // nothing was added
   const videos = (await (await page.request.get('/api/videos')).json()) as SourceVideo[]

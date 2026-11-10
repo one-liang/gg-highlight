@@ -1,5 +1,5 @@
 // Running yt-dlp: argv array (no shell), windowsHide, PYTHONUTF8=1, process-tree kill on abort (runCli),
-// both output streams read line by line.
+// both output streams read line by line (stderr only at \n / \r\n: progress redraws are on stdout).
 import { isAbortError, runCli } from '../transcription/process'
 import { errorLinesOf, exitStatusText, YTDLP_NOT_FOUND_MESSAGE } from './errors'
 import { type YtdlpConfig, YtdlpError } from './types'
@@ -30,8 +30,9 @@ export interface RunYtdlpOptions {
   /** WARNING lines as they come, and the output of a failed run. */
   log?: (message: string) => void
   /**
-   * Every output line of either stream, untrimmed (stdout lines only when `collectStdout` is not set).
-   * yt-dlp prints the progress template and `--print` to stdout, but reading both costs nothing.
+   * Every output line of either stream, untrimmed (stdout lines only when `collectStdout` is not set);
+   * a \r inside a stderr line becomes a space. yt-dlp prints the progress template and `--print` to
+   * stdout, but reading both costs nothing.
    */
   onLine?: (line: string) => void
   /** Keep stdout as one string instead of lines (`-J` prints one possibly multi-megabyte line). */
@@ -50,7 +51,10 @@ export async function runYtdlp(config: Pick<YtdlpConfig, 'command'>, args: strin
     tail.push(line)
     if (tail.length > TAIL_LINES) tail.shift()
   }
-  const onLine = (line: string) => {
+  const onLine = (raw: string) => {
+    // stderr is split only at \n: yt-dlp's retry errors read "ERROR: \r[download] Got error: <reason>.
+    // Giving up after 10 retries", and the reason must stay on the ERROR line.
+    const line = raw.includes('\r') ? raw.replace(/ *\r+ */g, ' ') : raw
     try {
       opts.onLine?.(line)
     }
@@ -72,6 +76,7 @@ export async function runYtdlp(config: Pick<YtdlpConfig, 'command'>, args: strin
       onLine: opts.collectStdout ? undefined : onLine,
       onStdoutData: opts.collectStdout ? chunk => chunks.push(chunk) : undefined,
       onStderrLine: onLine,
+      stderrLoneCr: false,
     })
     return {
       code: result.code,

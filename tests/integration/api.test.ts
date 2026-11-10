@@ -823,7 +823,7 @@ describe('YouTube (fake yt-dlp)', () => {
     expect(noChat.body).toMatchObject({ liveStatus: 'not_live', chatAvailable: false, heatmapAvailable: true })
   })
 
-  it('POST /api/youtube/probe: 400 for a bad body or a link that is not YouTube, 422 for playlists and channels, live, post-live and private videos, 502 when YouTube refuses', async () => {
+  it('POST /api/youtube/probe: 400 for a bad body or a link that is not YouTube, 422 for playlists and channels, live, upcoming, post-live and private videos, 502 when YouTube refuses', async () => {
     const cases: Array<[unknown, number, string]> = [
       ['{not json', 400, '請求內容不是正確的 JSON'],
       [{}, 400, '請貼上 YouTube 影片連結'],
@@ -832,6 +832,8 @@ describe('YouTube (fake yt-dlp)', () => {
       [{ url: 'https://www.youtube.com/playlist?list=PL0123456789' }, 422, PLAYLIST_OR_CHANNEL_MESSAGE],
       [{ url: 'https://www.youtube.com/@someone' }, 422, PLAYLIST_OR_CHANNEL_MESSAGE],
       [{ url: watch(ids.liveNow) }, 422, YTDLP_ERROR_MESSAGES.live!],
+      // not started: yt-dlp fails with "This live event will begin…" instead of printing is_upcoming
+      [{ url: watch(ids.upcoming) }, 422, YTDLP_ERROR_MESSAGES.live!],
       [{ url: watch(ids.postLive) }, 422, YTDLP_ERROR_MESSAGES['post-live']!],
       [{ url: watch(ids.private) }, 422, YTDLP_ERROR_MESSAGES.private!],
       [{ url: watch(ids.botCheck) }, 502, YTDLP_ERROR_MESSAGES.blocked!],

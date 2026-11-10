@@ -32,8 +32,14 @@
 //     ggPrivate01, ggBotCheck1 → every run fails (private video / bot check).
 //     ggChatFail1  → the chat run leaves a 0-byte .part and fails with HTTP 429.
 //     ggDl403Err1  → the video run leaves <id>.f137.mp4.part and fails with HTTP 403.
+//     ggUpcoming1  → every run fails with "This live event will begin in 3 hours." (a stream that has not
+//                    started: real yt-dlp has no formats for it and never prints live_status is_upcoming).
+//     ggRetryErr1  → retries used up, as yt-dlp prints them ("ERROR: \r[download] Got error: … Giving up
+//                    after 10 retries", the reason after a lone \r): the video run leaves a .part and fails
+//                    with HTTP 403; the chat run leaves a 0-byte .part and fails with HTTP 429 (two ERROR lines).
 //     ggSlowDl001  → the video run takes slowSteps × slowMs; the chat run writes 10 chunks slowMs apart;
 //                    SIGINT → "ERROR: Interrupted by user", exit 1; SIGTERM → exit 143.
+//   ggNoChat001's -J says language en-US (the others zh-TW), so the form's language preselect can be checked.
 //   Note: with the default 60 s duration the heatmap burst (20–26 s) starts inside the first 30 s, which
 //   the heatmap Signal caps at the median (design.md「重播熱度」step 2) → "沒有明顯起伏". Use a longer
 //   duration or --fake-heatmap-peak=36 for a heatmap the Signal uses.
@@ -52,6 +58,8 @@ export type FakeYtdlpScenarioName =
   | 'download403'
   | 'slowDownload'
   | 'botCheck'
+  | 'upcoming'
+  | 'retryErrors'
 
 export interface FakeYtdlpScenario {
   live: 'not_live' | 'was_live' | 'post_live' | 'is_live' | 'is_upcoming'
@@ -59,9 +67,13 @@ export interface FakeYtdlpScenario {
   chat: boolean
   /** -J has a heatmap (else the key is absent, as yt-dlp drops null fields). */
   heatmap: boolean
+  /** -J language (default zh-TW). */
+  language?: string
   /** Every run (except --version) fails with this FAKE_YTDLP_ERRORS entry. */
-  fail?: 'private' | 'botCheck'
+  fail?: 'private' | 'botCheck' | 'upcoming'
   chatFail?: boolean
+  /** The video and chat runs fail with yt-dlp's "Giving up after 10 retries" ERROR lines. */
+  retryErrors?: boolean
   download403?: boolean
   slow?: boolean
 }
@@ -101,12 +113,17 @@ export declare const FAKE_YTDLP_IDS: Readonly<{
   download403: 'ggDl403Err1'
   slowDownload: 'ggSlowDl001'
   botCheck: 'ggBotCheck1'
+  upcoming: 'ggUpcoming1'
+  retryErrors: 'ggRetryErr1'
 }>
 export declare const FAKE_YTDLP_ERRORS: Readonly<{
   private: (id: string) => string
   botCheck: (id: string) => string
   chat429: string
   download403: string
+  upcoming: (id: string) => string
+  retry403: string
+  retryChat429: readonly string[]
 }>
 export declare const FAKE_YTDLP_DEFAULTS: Readonly<{ durationSec: number, slowMs: number, slowSteps: number }>
 

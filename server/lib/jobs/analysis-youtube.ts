@@ -1,18 +1,17 @@
 // The YouTube parts of an Analysis (design.md「YouTube」): the download step of a 'full' run, the metadata
 // refresh at the start of a 'highlights' run's signals step, and the chat density / replay heatmap Signals.
 import path from 'node:path'
-import type { SignalState, YoutubeMeta } from '../../../shared/types/domain'
+import { HEATMAP_READ_FAILED_PREFIX, type SignalState, type YoutubeMeta } from '../../../shared/types/domain'
 import { canonicalYoutubeUrl, parseYoutubeUrl } from '../../../shared/utils/youtube-url'
 import type { VideoRecord } from '../db'
 import { downloadsDir } from '../library/removal'
 import type { SignalsFile } from '../signals'
 import {
   assertAddable, CHAT_MIN_PER_HOUR, chatDensity, chatDownloadFailureReason, chatFilePath, heatmapTrack, METADATA_TIMEOUT_MS,
-  readChatMessages, type YoutubeMetadata, YtdlpError,
+  readChatMessages, type YoutubeMetadata, YtdlpError, ytdlpErrorCause,
 } from '../youtube'
 import { DOWNLOAD_STEP_SHARES } from './analysis-steps'
 import type { AnalysisRun } from './analysis-steps'
-import { ytdlpReason } from './errors'
 import { isFile } from './files'
 import { throwIfAborted } from './worker'
 
@@ -21,7 +20,7 @@ export const CHAT_UNREADABLE_REASON = '讀不到聊天室重播檔'
 export const CHAT_TOO_FEW_REASON = '聊天室訊息太少（平均每分鐘不到 2 則），不採用'
 export const NO_HEATMAP_REASON = '這支影片沒有 YouTube 重播熱度（觀看次數不夠多或影片太新）'
 export const FLAT_HEATMAP_REASON = '重播熱度沒有明顯起伏'
-export const HEATMAP_FAILED_PREFIX = '無法取得重播熱度：'
+export const HEATMAP_FAILED_PREFIX = HEATMAP_READ_FAILED_PREFIX
 
 /** Which YouTube video a Source Video is. */
 export interface YoutubeSource {
@@ -65,8 +64,9 @@ export function youtubeSourceOf(video: Pick<VideoRecord, 'youtubeUrl' | 'youtube
   return { url: parsed?.ok ? parsed.url : canonicalYoutubeUrl(youtubeId), youtubeId, stored: video.youtube }
 }
 
+/** The cause of a failed read, without an action (it ends up in the heatmap Signal's missing reason). */
 function errorText(err: unknown): string {
-  if (err instanceof YtdlpError) return ytdlpReason(err)
+  if (err instanceof YtdlpError) return ytdlpErrorCause(err)
   if (err instanceof Error) return err.message || '原因不明'
   return String(err)
 }
