@@ -44,7 +44,7 @@ describe('setup.ps1', () => {
   })
 
   it('installs the documented tools and models', () => {
-    for (const id of ['OpenJS.NodeJS.LTS', 'Gyan.FFmpeg', 'astral-sh.uv', 'Ollama.Ollama', 'DenoLand.Deno']) {
+    for (const id of ['OpenJS.NodeJS.LTS', 'Gyan.FFmpeg', 'astral-sh.uv', 'Ollama.Ollama']) {
       expect(text).toContain(`'${id}'`)
     }
     expect(text).toMatch(/npm install -g pnpm@10/)
@@ -67,7 +67,7 @@ describe('setup.ps1', () => {
   it('pulls the Ollama model of the app, unless models or Ollama are skipped', () => {
     expect(text).toContain(`$DefaultOllamaModel = '${DEFAULT_OLLAMA_MODEL}'`)
     expect(text).toContain('約 6.6 GB')
-    const step = text.slice(text.indexOf('# ---- 8.'), text.indexOf('# ---- 9.'))
+    const step = text.slice(text.indexOf('# ---- 9.'), text.indexOf('# ---- 10.'))
     expect(step).toMatch(/\$env:GG_OLLAMA_MODEL/)
     expect(step).toMatch(/\$OllamaUrl -eq 'off'/)
     expect(step).toMatch(/Test-OllamaModel \$OllamaModel/)
@@ -87,6 +87,18 @@ describe('setup.ps1', () => {
   it('names features instead of milestone 2', () => {
     expect(text).not.toContain('里程碑 2')
     expect(text).toContain('Ollama（自動找精華）')
+  })
+
+  it('installs yt-dlp into tools/ with scripts/ytdlp.mjs after uv, never Deno from winget', () => {
+    expect(text).not.toMatch(/deno/i)
+    expect(text).not.toContain('里程碑 3')
+    const step = text.slice(text.indexOf('# ---- 6.'), text.indexOf('# ---- 7.'))
+    expect(text.indexOf('# ---- 6.')).toBeGreaterThan(text.indexOf('# ---- 5.'))
+    expect(step).toMatch(/^& node \(Join-Path \$Root 'scripts\\ytdlp\.mjs'\) install\s*$/m)
+    // Only YouTube needs it: a failure is a note, and -SkipOptional (Ollama only) does not skip it.
+    expect(step).toMatch(/if \(\$LASTEXITCODE -ne 0\) \{\s*Add-Note '[^']*YouTube/)
+    expect(step).not.toMatch(/Stop-Setup|SkipOptional/)
+    expect(text).toMatch(/-SkipOptional {2}不安裝 Ollama（自動找精華），也不下載 Ollama 模型/)
   })
 
   it('runs pnpm install without a Y/n prompt and explains a failure without blaming the network', () => {

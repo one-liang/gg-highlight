@@ -4,7 +4,7 @@
   可以重複執行：已經裝好的東西會自動跳過。
 
   參數：
-    -SkipOptional  不安裝 Ollama（自動找精華）與 Deno（里程碑 3 才會用到）
+    -SkipOptional  不安裝 Ollama（自動找精華），也不下載 Ollama 模型
     -SkipModels    不預先下載模型：語音辨識模型第一次分析時才下載；
                    Ollama 模型（qwen3.5:9b，約 6.6 GB）之後要自己執行 ollama pull
 
@@ -40,8 +40,7 @@ $Tools = @(
   @{ Name = 'Node.js'; Id = 'OpenJS.NodeJS.LTS'; Commands = @('node'); Optional = $false },
   @{ Name = 'FFmpeg'; Id = 'Gyan.FFmpeg'; Commands = @('ffmpeg', 'ffprobe'); Optional = $false },
   @{ Name = 'uv（Python 環境管理）'; Id = 'astral-sh.uv'; Commands = @('uv'); Optional = $false },
-  @{ Name = 'Ollama（自動找精華）'; Id = 'Ollama.Ollama'; Commands = @('ollama'); Optional = $true; Later = '沒有 Ollama 時，自動找精華只會用音量；之後可以重新執行 setup.bat，或到 https://ollama.com/download 安裝。' },
-  @{ Name = 'Deno（里程碑 3：YouTube）'; Id = 'DenoLand.Deno'; Commands = @('deno'); Optional = $true; Later = '現在還用不到，可以之後再裝。' }
+  @{ Name = 'Ollama（自動找精華）'; Id = 'Ollama.Ollama'; Commands = @('ollama'); Optional = $true; Later = '沒有 Ollama 時，自動找精華只會用音量；之後可以重新執行 setup.bat，或到 https://ollama.com/download 安裝。' }
 )
 
 $script:StepNumber = 0
@@ -299,14 +298,23 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Ok '語音辨識環境安裝完成'
 
-# ---- 6. Subtitle font ----
+# ---- 6. yt-dlp (YouTube) ----
+# The app manages its own yt-dlp in tools\ (uv tool install, ADR-0003); start.bat updates it once a day.
+# Only YouTube needs it, so a failure is a note, not a stop. Skipped by the script when GG_YTDLP_CMD is set.
+Write-Step '安裝 YouTube 下載工具 yt-dlp（裝在專案的 tools 資料夾）'
+& node (Join-Path $Root 'scripts\ytdlp.mjs') install
+if ($LASTEXITCODE -ne 0) {
+  Add-Note 'yt-dlp 沒有安裝成功，暫時不能加入 YouTube 影片（其他功能不受影響）。下次雙擊 start.bat 時會自動再試一次，也可以重新執行 setup.bat。'
+}
+
+# ---- 7. Subtitle font ----
 Write-Step '準備字幕字型（Noto Sans CJK TC）'
 & node (Join-Path $Root 'scripts\fetch-fonts.mjs')
 if ($LASTEXITCODE -ne 0) {
   Add-Note '字幕字型還沒準備好，燒錄的字幕可能無法顯示中文。請照上面的說明手動下載。'
 }
 
-# ---- 7. ASR models ----
+# ---- 8. ASR models ----
 if ($SkipModels) {
   Write-Step '略過預先下載語音辨識模型（-SkipModels）'
   Write-Info '第一次分析影片時會自動下載。'
@@ -326,7 +334,7 @@ else {
   }
 }
 
-# ---- 8. Ollama model ----
+# ---- 9. Ollama model ----
 # Optional: without Ollama or its model, the transcript signal is missing and highlights use loudness only.
 $OllamaModel = $DefaultOllamaModel
 if ($env:GG_OLLAMA_MODEL -and ("$env:GG_OLLAMA_MODEL".Trim().Length -gt 0)) { $OllamaModel = "$env:GG_OLLAMA_MODEL".Trim() }
@@ -372,7 +380,7 @@ else {
   }
 }
 
-# ---- 9. Final check ----
+# ---- 10. Final check ----
 Write-Step '最後檢查環境（node scripts\doctor.mjs）'
 & node (Join-Path $Root 'scripts\doctor.mjs')
 $doctorCode = $LASTEXITCODE

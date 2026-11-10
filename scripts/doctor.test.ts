@@ -12,7 +12,6 @@ import {
   checkDataDir,
   checkFfmpeg,
   checkFonts,
-  checkLaterTools,
   checkNode,
   checkNvenc,
   checkNvidiaSmi,
@@ -20,6 +19,7 @@ import {
   checkPnpm,
   checkTranscriber,
   checkUv,
+  checkYtdlp,
   createContext,
   DEFAULT_OLLAMA_MODEL,
   DEFAULT_OLLAMA_URL,
@@ -37,6 +37,7 @@ import {
   runChecks,
   summarizeFfmpegError,
   transcriberCommand,
+  ytdlpCommand,
 } from './doctor.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -524,12 +525,56 @@ describe('checkOllama', () => {
   })
 })
 
-describe('checkLaterTools', () => {
-  it('lists Deno as not needed yet', async () => {
-    const results = await checkLaterTools(ctx({ run: fakeRun({ deno: ok('deno 2.5.0 (stable)\nv8 13\ntypescript 5.9\n') }) }))
-    expect(results.map(r => [r.id, r.status, r.required])).toEqual([['deno', 'later', false]])
-    expect(results[0].detail).toMatch(/尚未需要（里程碑 3/)
-    expect(results[0].detail).toMatch(/已安裝/)
+describe('checkYtdlp', () => {
+  const managedExe = () => path.join(tmp, 'tools', 'bin', 'yt-dlp')
+  async function installManaged() {
+    await fs.mkdir(path.dirname(managedExe()), { recursive: true })
+    await fs.writeFile(managedExe(), '')
+  }
+
+  it('builds the command like the server: GG_YTDLP_CMD, else tools/bin/yt-dlp(.exe)', () => {
+    expect(ytdlpCommand({}, '/gg', 'linux')).toEqual([path.join('/gg', 'tools', 'bin', 'yt-dlp')])
+    expect(ytdlpCommand({ GG_YTDLP_CMD: '   ' }, '/gg', 'win32')).toEqual([path.join('/gg', 'tools', 'bin', 'yt-dlp.exe')])
+    expect(ytdlpCommand({ GG_YTDLP_CMD: 'node  fake.mjs' }, '/gg')).toEqual(['node', 'fake.mjs'])
+    const argv = ['C:\\Program Files\\nodejs\\node.exe', 'fake.mjs']
+    expect(ytdlpCommand({ GG_YTDLP_CMD: JSON.stringify(argv) }, '/gg')).toEqual(argv)
+  })
+
+  it('warns, without running anything, when the managed copy is not installed yet', async () => {
+    const calls: Call[] = []
+    const r = await checkYtdlp(ctx({ run: fakeRun({}, calls), platform: 'linux' }))
+    expect(r).toMatchObject({ id: 'yt-dlp', status: 'warn', required: false, detail: '還沒有安裝' })
+    expect(r.fix).toMatch(/start\.bat.*setup\.bat.*不能加入 YouTube 影片/)
+    expect(calls).toEqual([])
+  })
+
+  it('reports the version of the managed copy', async () => {
+    await installManaged()
+    const calls: Call[] = []
+    const r = await checkYtdlp(ctx({ run: fakeRun({ [`${managedExe()} --version`]: ok('2026.10.26\n') }, calls), platform: 'linux' }))
+    expect(r).toMatchObject({ status: 'ok', required: false, detail: '2026.10.26', fix: null })
+    expect(calls).toEqual([{ command: managedExe(), args: ['--version'] }])
+  })
+
+  it('warns when the managed copy cannot run or hangs', async () => {
+    await installManaged()
+    const broken = await checkYtdlp(ctx({ run: fakeRun({ [managedExe()]: failed('ModuleNotFoundError: No module named yt_dlp') }), platform: 'linux' }))
+    expect(broken).toMatchObject({ status: 'warn', required: false, detail: '無法執行：ModuleNotFoundError: No module named yt_dlp' })
+    expect(broken.fix).toMatch(/刪掉專案裡的 tools 資料夾/)
+    const hung = { ok: false, code: null, stdout: '', stderr: '', notFound: false, timedOut: true, error: 'timeout' }
+    const slow = await checkYtdlp(ctx({ run: fakeRun({ [managedExe()]: hung }), platform: 'linux' }))
+    expect(slow).toMatchObject({ status: 'warn', detail: '無法執行：15 秒內沒有回應' })
+  })
+
+  it('runs GG_YTDLP_CMD instead, and warns when it fails', async () => {
+    const calls: Call[] = []
+    const good = await checkYtdlp(ctx({ env: { GG_YTDLP_CMD: 'node fake-yt-dlp.mjs' }, run: fakeRun({ 'node fake-yt-dlp.mjs --version': ok('2099.01.01') }, calls) }))
+    expect(good).toMatchObject({ status: 'ok', detail: '2099.01.01（GG_YTDLP_CMD）' })
+    expect(calls).toEqual([{ command: 'node', args: ['fake-yt-dlp.mjs', '--version'] }])
+    const bad = await checkYtdlp(ctx({ env: { GG_YTDLP_CMD: 'nope' } }))
+    expect(bad).toMatchObject({ status: 'warn', required: false, detail: '無法執行 GG_YTDLP_CMD：找不到 nope' })
+    const malformed = await checkYtdlp(ctx({ env: { GG_YTDLP_CMD: '["unterminated' } }))
+    expect(malformed).toMatchObject({ status: 'warn', detail: 'GG_YTDLP_CMD 格式不正確' })
   })
 })
 
@@ -549,13 +594,13 @@ describe('runChecks / report', () => {
     font.write('OTTO', 0, 'latin1')
     await fs.writeFile(path.join(tmp, 'fonts', 'NotoSansCJKtc-Bold.otf'), font)
     const results = await runChecks(ctx({ run: everythingOk }))
-    expect(results.map(r => r.id)).toEqual(['node', 'pnpm', 'ffmpeg', 'ffprobe', 'libass', 'nvenc', 'uv', 'transcriber', 'fonts', 'data', 'nvidia-smi', 'ollama', 'deno'])
+    expect(results.map(r => r.id)).toEqual(['node', 'pnpm', 'ffmpeg', 'ffprobe', 'libass', 'nvenc', 'uv', 'transcriber', 'fonts', 'data', 'nvidia-smi', 'ollama', 'yt-dlp'])
     expect(exitCodeFor(results)).toBe(0)
     const report = formatReport(results)
     expect(report).toMatch(/✅ Node\.js：v/)
     expect(report).toMatch(/⚠️ NVENC 硬體編碼/)
     expect(report).toMatch(/⚠️ Ollama（自動找精華）：找不到 Ollama/)
-    expect(report).toMatch(/➖ Deno：尚未需要/)
+    expect(report).toMatch(/⚠️ yt-dlp（YouTube 下載）：還沒有安裝/)
     expect(report).toMatch(/必要項目都通過了（另有 \d+ 個提醒）/)
   })
 
@@ -573,6 +618,8 @@ describe('CLI', () => {
   it('prints machine-readable results with --json', async () => {
     const fake = path.join(tmp, 'fake-transcriber.mjs')
     await fs.writeFile(fake, 'if (process.argv[2] === "check") console.log(JSON.stringify({ type: "check", python: "3.12.0", fasterWhisper: "1.2.1", ctranslate2: "4.8.3", cudaDevices: 0 }))\n')
+    const fakeYtdlp = path.join(tmp, 'fake-yt-dlp.mjs')
+    await fs.writeFile(fakeYtdlp, 'if (process.argv[2] === "--version") console.log("2026.10.26")\n')
     const r = spawnSync(process.execPath, [path.join(here, 'doctor.mjs'), '--json'], {
       cwd: tmp,
       encoding: 'utf8',
@@ -584,6 +631,7 @@ describe('CLI', () => {
         GG_DATA_DIR: path.join(tmp, 'data'),
         GG_FONTS_DIR: path.join(tmp, 'fonts'),
         GG_OLLAMA_URL: 'off',
+        GG_YTDLP_CMD: JSON.stringify([process.execPath, fakeYtdlp]),
       },
     })
     const parsed = JSON.parse(r.stdout)
@@ -594,6 +642,7 @@ describe('CLI', () => {
     expect(byId.transcriber).toMatchObject({ status: 'warn', detail: expect.stringMatching(/CUDA 裝置 0 個/) })
     expect(byId.data.status).toBe('ok')
     expect(byId.ollama).toMatchObject({ status: 'later', detail: expect.stringMatching(/^已關閉/) })
+    expect(byId['yt-dlp']).toMatchObject({ status: 'ok', required: false, detail: '2026.10.26（GG_YTDLP_CMD）' })
     expect(r.stderr).not.toMatch(/ExperimentalWarning/)
   })
 })

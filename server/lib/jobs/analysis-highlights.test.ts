@@ -145,6 +145,8 @@ describe('full Analysis with Signals', () => {
 
     const files = analysisFiles(env, video.id)
     const signals = await readSignalsFile(files.signals)
+    // version 2; a local video has no heatmap (and no chat / heatmap SignalStates, see above)
+    expect(JSON.parse(await fsp.readFile(files.signals, 'utf8'))).toMatchObject({ version: 2, heatmap: null })
     expect(signals?.loudness?.db).toHaveLength(Math.ceil(done.media!.durationSec))
     // lavfi's sine is -18 dBFS; outside the burst it is turned down by 34 dB.
     expect(Math.max(...signals!.loudness!.db.slice(BURST.start, BURST.end))).toBeGreaterThan(-25)

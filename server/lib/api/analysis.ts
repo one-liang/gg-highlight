@@ -1,5 +1,5 @@
 // API rules that depend on the video's Analysis (design.md「重新分析」).
-import type { AnalysisMode, AnalysisState } from '../../../shared/types/domain'
+import type { AnalysisMode, AnalysisState, SourceKind } from '../../../shared/types/domain'
 import { conflict, unprocessable } from './errors'
 
 type WithAnalysis = { analysis: Pick<AnalysisState, 'status' | 'mode' | 'version'> }
@@ -29,8 +29,19 @@ export interface ReanalyzeContext {
   sourceExists: boolean
 }
 
-/** Throws the 409 / 422 of design.md「重新分析」 when the video cannot be analysed again in `mode` now. */
-export function checkReanalyze(video: WithAnalysis, mode: AnalysisMode, ctx: ReanalyzeContext): void {
+/**
+ * True when a 'full' run can transcribe the video: its source file is on disk, or it is a YouTube video
+ * (the download step downloads a missing file again).
+ */
+export function canTranscribe(video: { sourceKind?: SourceKind }, sourceExists: boolean): boolean {
+  return sourceExists || video.sourceKind === 'youtube'
+}
+
+/**
+ * Throws the 409 / 422 of design.md「重新分析」 when the video cannot be analysed again in `mode` now.
+ * A missing source file only stops 'full' for local videos (canTranscribe); pass the video's sourceKind.
+ */
+export function checkReanalyze(video: WithAnalysis & { sourceKind?: SourceKind }, mode: AnalysisMode, ctx: ReanalyzeContext): void {
   const { status } = video.analysis
   if (status === 'queued' || status === 'running') throw conflict(REANALYZE_BUSY_MESSAGE)
   if (mode === 'highlights') {
@@ -38,7 +49,7 @@ export function checkReanalyze(video: WithAnalysis, mode: AnalysisMode, ctx: Rea
     return
   }
   if (ctx.activeClips > 0) throw conflict(REANALYZE_CLIPS_BUSY_MESSAGE)
-  if (!ctx.sourceExists) throw unprocessable(REANALYZE_MISSING_SOURCE_MESSAGE)
+  if (!canTranscribe(video, ctx.sourceExists)) throw unprocessable(REANALYZE_MISSING_SOURCE_MESSAGE)
 }
 
 /** 409 messages of the routes that need the Transcript (transcriptReady). */

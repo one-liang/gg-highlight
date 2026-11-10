@@ -4,10 +4,17 @@ import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import type { Clip, Highlight, MediaInfo, Settings, SourceVideo, SystemInfo, TranscriptSegment, UploadResult, WatchFolderFile } from '../../shared/types/domain'
+import type {
+  Clip, Highlight, MediaInfo, Settings, SourceVideo, SystemInfo, TranscriptSegment, UploadResult, WatchFolderFile, YoutubeInfo,
+} from '../../shared/types/domain'
+import { NOT_YOUTUBE_MESSAGE, PLAYLIST_OR_CHANNEL_MESSAGE } from '../../shared/utils/youtube-url'
 import { type FakeOllama, startFakeOllama } from '../../server/lib/llm/test-helpers/fake-ollama.mjs'
+import { YTDLP_ERROR_MESSAGES } from '../../server/lib/youtube/errors'
+import { FAKE_YTDLP_IDS, readArgsLogs } from '../../server/lib/youtube/test-helpers/fake-yt-dlp.mjs'
 import { fixtures } from '../fixtures'
-import { api, ensureBuild, FAKE_TRANSCRIBER, getBytes, ROOT_DIR, type RunningServer, startServer, uploadFile, waitUntil } from './server'
+import {
+  api, ensureBuild, FAKE_TRANSCRIBER, FAKE_YTDLP, getBytes, ROOT_DIR, type RunningServer, startServer, uploadFile, waitUntil,
+} from './server'
 
 const OLLAMA_VERSION = '0.40.15'
 const OLLAMA_MODEL = 'qwen3.5:9b'
@@ -24,6 +31,8 @@ let dataDir: string
 let watchDir: string
 let outsideDir: string
 let failMarker: string
+/** Where the fake yt-dlp writes one args log per run (readArgsLogs). */
+let ytdlpLogDir: string
 
 // Files in the Watch Folder (copies of the fixtures, so deleting can never touch the shared ones).
 let mkvPath: string
@@ -58,6 +67,8 @@ beforeAll(async () => {
   watchDir = path.join(tmp, 'watch 資料夾')
   outsideDir = path.join(tmp, 'outside')
   failMarker = path.join(tmp, 'fail-transcriber')
+  ytdlpLogDir = path.join(tmp, 'yt-dlp-logs')
+  await fsp.mkdir(ytdlpLogDir, { recursive: true })
   await fsp.mkdir(watchDir, { recursive: true })
   await fsp.mkdir(outsideDir, { recursive: true })
   mkvPath = path.join(watchDir, '直播 測試.mkv')
@@ -83,6 +94,13 @@ beforeAll(async () => {
     GG_FAKE_DELAY_MS: '100',
     GG_OLLAMA_URL: ollama.url,
     GG_OLLAMA_MODEL: OLLAMA_MODEL,
+    // The fake yt-dlp "downloads" the 60 s highlights fixture; its heatmap burst at 36 s is past the
+    // first 30 s (which the heatmap Signal flattens), so the heatmap is used.
+    GG_YTDLP_CMD: JSON.stringify([process.execPath, FAKE_YTDLP]),
+    GG_FAKE_YTDLP_MEDIA: fx.highlightsZhMkv,
+    GG_FAKE_YTDLP_DURATION: '60',
+    GG_FAKE_YTDLP_HEATMAP_PEAK: '36',
+    GG_FAKE_YTDLP_LOG_DIR: ytdlpLogDir,
   })
   base = server.url
 })
@@ -255,8 +273,10 @@ describe('probe and adding videos', () => {
     expect(lang.status).toBe(400)
     expect(lang.body.statusMessage).toContain('語言')
 
-    const kind = await api(base, 'POST', '/api/videos', { sourceKind: 'youtube', language: 'en', audioTrack: 0 })
-    expect(kind.status).toBe(400)
+    const kind = await api(base, 'POST', '/api/videos', { sourceKind: 'dropbox', filePath: mkvPath, language: 'en', audioTrack: 0 })
+    expect([kind.status, kind.body.statusMessage]).toEqual([400, '來源必須是 watch-folder、upload 或 youtube'])
+    const noLink = await api(base, 'POST', '/api/videos', { sourceKind: 'youtube', language: 'en', audioTrack: 0 })
+    expect([noLink.status, noLink.body.statusMessage]).toEqual([400, '請貼上 YouTube 影片連結'])
 
     const track = await api(base, 'POST', '/api/videos', { sourceKind: 'watch-folder', filePath: mkvPath, language: 'en', audioTrack: 7 })
     expect(track.status).toBe(422)
@@ -766,6 +786,188 @@ describe('failure, retry and removal', () => {
   })
 })
 
+describe('YouTube (fake yt-dlp)', () => {
+  const ids = FAKE_YTDLP_IDS
+  const watch = (id: string) => `https://www.youtube.com/watch?v=${id}`
+  const downloadsDir = () => path.join(dataDir, 'downloads')
+  const downloadFiles = (videoId: string) => {
+    try {
+      return fs.readdirSync(downloadsDir()).filter(name => name.startsWith(`${videoId}.`))
+    }
+    catch {
+      return []
+    }
+  }
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0)
+      return true
+    }
+    catch {
+      return false
+    }
+  }
+  let video: SourceVideo
+
+  it('POST /api/youtube/probe reads a live replay (without the heatmap or the read time)', async () => {
+    const res = await api<YoutubeInfo>(base, 'POST', '/api/youtube/probe', { url: `https://youtu.be/${ids.vodChat}?si=abc&t=42` })
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      id: ids.vodChat, url: watch(ids.vodChat), title: `測試直播重播 ${ids.vodChat}`, channel: '測試頻道', durationSec: 60,
+      liveStatus: 'was_live', uploadDate: '2026-11-01', chatAvailable: true, heatmapAvailable: true, languageHint: 'zh', inLibraryVideoId: null,
+    })
+    // yt-dlp got the canonical link
+    expect(readArgsLogs(ytdlpLogDir, ids.vodChat).map(log => [log.mode, log.argv.at(-1)])).toEqual([['metadata', watch(ids.vodChat)]])
+
+    const noChat = await api<YoutubeInfo>(base, 'POST', '/api/youtube/probe', { url: watch(ids.noChat) })
+    expect(noChat.body).toMatchObject({ liveStatus: 'not_live', chatAvailable: false, heatmapAvailable: true })
+  })
+
+  it('POST /api/youtube/probe: 400 for a bad body or a link that is not YouTube, 422 for playlists and channels, live, post-live and private videos, 502 when YouTube refuses', async () => {
+    const cases: Array<[unknown, number, string]> = [
+      ['{not json', 400, '請求內容不是正確的 JSON'],
+      [{}, 400, '請貼上 YouTube 影片連結'],
+      [{ url: '   ' }, 400, '請貼上 YouTube 影片連結'],
+      [{ url: 'https://vimeo.com/123456' }, 400, NOT_YOUTUBE_MESSAGE],
+      [{ url: 'https://www.youtube.com/playlist?list=PL0123456789' }, 422, PLAYLIST_OR_CHANNEL_MESSAGE],
+      [{ url: 'https://www.youtube.com/@someone' }, 422, PLAYLIST_OR_CHANNEL_MESSAGE],
+      [{ url: watch(ids.liveNow) }, 422, YTDLP_ERROR_MESSAGES.live!],
+      [{ url: watch(ids.postLive) }, 422, YTDLP_ERROR_MESSAGES['post-live']!],
+      [{ url: watch(ids.private) }, 422, YTDLP_ERROR_MESSAGES.private!],
+      [{ url: watch(ids.botCheck) }, 502, YTDLP_ERROR_MESSAGES.blocked!],
+    ]
+    for (const [body, status, message] of cases) {
+      const res = await api(base, 'POST', '/api/youtube/probe', body)
+      expect([res.status, res.body.statusMessage], JSON.stringify(body)).toEqual([status, message])
+    }
+    const get = await api(base, 'GET', '/api/youtube/probe')
+    expect([get.status, get.headers.get('allow')]).toEqual([405, 'POST'])
+  })
+
+  it('POST /api/videos refuses bad YouTube links, other audio tracks and videos that cannot be added', async () => {
+    const before = (await api<SourceVideo[]>(base, 'GET', '/api/videos')).body.length
+    const add = (body: Record<string, unknown>) => api(base, 'POST', '/api/videos', { sourceKind: 'youtube', language: 'zh', ...body })
+    const cases: Array<[Record<string, unknown>, number, string]> = [
+      [{ youtubeUrl: watch(ids.vodChat), audioTrack: 1 }, 400, 'YouTube 影片只有一條音軌，音軌必須是 0'],
+      [{ youtubeUrl: '' }, 400, '請貼上 YouTube 影片連結'],
+      [{ youtubeUrl: 'https://example.com/video.mp4' }, 400, NOT_YOUTUBE_MESSAGE],
+      [{ youtubeUrl: 'https://www.youtube.com/channel/UC0123456789' }, 422, PLAYLIST_OR_CHANNEL_MESSAGE],
+      [{ youtubeUrl: watch(ids.liveNow) }, 422, YTDLP_ERROR_MESSAGES.live!],
+      [{ youtubeUrl: watch(ids.postLive) }, 422, YTDLP_ERROR_MESSAGES['post-live']!],
+      [{ youtubeUrl: watch(ids.private) }, 422, YTDLP_ERROR_MESSAGES.private!],
+      [{ youtubeUrl: watch(ids.botCheck) }, 502, YTDLP_ERROR_MESSAGES.blocked!],
+    ]
+    for (const [body, status, message] of cases) {
+      const res = await add(body)
+      expect([res.status, res.body.statusMessage], JSON.stringify(body)).toEqual([status, message])
+    }
+    expect((await api<SourceVideo[]>(base, 'GET', '/api/videos')).body).toHaveLength(before)
+  })
+
+  it('adds a YouTube video without a file (no second metadata read), and refuses the same video twice', async () => {
+    const res = await api<SourceVideo>(base, 'POST', '/api/videos', { sourceKind: 'youtube', youtubeUrl: `https://www.youtube.com/live/${ids.vodChat}?t=10`, language: 'zh' })
+    expect(res.status).toBe(200)
+    video = res.body
+    expect(video).toMatchObject({
+      title: `測試直播重播 ${ids.vodChat}`,
+      sourceKind: 'youtube',
+      filePath: null,
+      youtubeUrl: watch(ids.vodChat),
+      youtube: {
+        id: ids.vodChat, channel: '測試頻道', durationSec: 60, liveStatus: 'was_live', uploadDate: '2026-11-01', chatAvailable: true, heatmapAvailable: true,
+      },
+      language: 'zh',
+      audioTrack: 0,
+      media: null,
+      fileMissing: false,
+      analysis: { mode: 'full' },
+    })
+    expect(['queued', 'running']).toContain(video.analysis.status)
+
+    const probe = await api<YoutubeInfo>(base, 'POST', '/api/youtube/probe', { url: `https://m.youtube.com/watch?v=${ids.vodChat}` })
+    expect([probe.status, probe.body.inLibraryVideoId]).toEqual([200, video.id])
+    const again = await api(base, 'POST', '/api/videos', { sourceKind: 'youtube', youtubeUrl: `https://youtu.be/${ids.vodChat}`, language: 'en', audioTrack: 0 })
+    expect([again.status, again.body.statusMessage]).toEqual([409, '這支影片已在影片庫'])
+    // probe, add, probe and the refused add all used the one read of the first probe
+    expect(readArgsLogs(ytdlpLogDir, ids.vodChat).filter(log => log.mode === 'metadata')).toHaveLength(1)
+  })
+
+  it('downloads the video and its chat replay, then analyses it with the chat and heatmap Signals', async () => {
+    const done = await waitForAnalysis(video.id)
+    expect(done.analysis).toMatchObject({ status: 'done', mode: 'full', version: 2, progress: 1, error: null })
+    expect(done.analysis.signals).toMatchObject([
+      { kind: 'loudness', status: 'used' },
+      { kind: 'transcript', status: 'used' },
+      { kind: 'chat', status: 'used', reason: expect.stringMatching(/^平均每分鐘 \d+(?:\.\d+)? 則$/) },
+      { kind: 'heatmap', status: 'used' },
+    ])
+    expect(done.filePath).not.toBeNull()
+    expect(path.dirname(done.filePath!)).toBe(downloadsDir())
+    expect(path.basename(done.filePath!)).toMatch(new RegExp(`^${video.id}\\.(?:mkv|mp4)$`))
+    expect(fs.existsSync(done.filePath!)).toBe(true)
+    expect(fs.existsSync(path.join(downloadsDir(), `${video.id}.live_chat.json`))).toBe(true)
+    expect(done.media?.durationSec).toBeCloseTo(60, 0)
+    expect(done.fileMissing).toBe(false)
+    // the metadata read of the probe was reused by the download step
+    expect(readArgsLogs(ytdlpLogDir, ids.vodChat).map(log => log.mode)).toEqual(['metadata', 'video', 'chat'])
+
+    const candidates = (await api<Highlight[]>(base, 'GET', `/api/videos/${video.id}/highlights`)).body
+    expect(candidates.length).toBeGreaterThan(0)
+    expect((await api<TranscriptSegment[]>(base, 'GET', `/api/videos/${video.id}/transcript`)).body.length).toBeGreaterThan(0)
+    const signals = JSON.parse(await fsp.readFile(path.join(dataDir, 'videos', video.id, 'signals.json'), 'utf8')) as { version: number, heatmap: { markers: unknown[] } | null }
+    expect(signals.version).toBe(2)
+    expect(signals.heatmap?.markers.length).toBeGreaterThan(10)
+  })
+
+  it('without its downloaded file: clips say so (422), and full is still allowed and downloads it again', async () => {
+    const highlight = await api<Highlight>(base, 'POST', `/api/videos/${video.id}/highlights`, { start: 1, end: 3 })
+    expect(highlight.status).toBe(200)
+    const file = (await api<SourceVideo>(base, 'GET', `/api/videos/${video.id}`)).body.filePath!
+    await fsp.rm(file)
+    expect((await api<SourceVideo>(base, 'GET', `/api/videos/${video.id}`)).body.fileMissing).toBe(true)
+
+    const clip = await api(base, 'POST', `/api/highlights/${highlight.body.id}/clips`, { layout: 'original', burnSubtitles: false })
+    expect([clip.status, clip.body.statusMessage]).toEqual([422, '找不到下載的影片檔，無法輸出剪輯'])
+
+    const full = await api<SourceVideo>(base, 'POST', `/api/videos/${video.id}/reanalyze`, { mode: 'full' })
+    expect(full.status).toBe(200)
+    expect(full.body.analysis).toMatchObject({ mode: 'full' })
+    const done = await waitForAnalysis(video.id)
+    expect(done.analysis).toMatchObject({ status: 'done', mode: 'full', error: null })
+    expect(done.filePath).toBe(file)
+    expect(done.fileMissing).toBe(false)
+    expect(fs.existsSync(file)).toBe(true)
+    // downloaded again (metadata still cached, chat file still there)
+    expect(readArgsLogs(ytdlpLogDir, ids.vodChat).map(log => log.mode)).toEqual(['metadata', 'video', 'chat', 'video'])
+    expect((await api<Highlight[]>(base, 'GET', `/api/videos/${video.id}/highlights`)).body.map(h => h.id)).toContain(highlight.body.id)
+  })
+
+  it('DELETE during a slow download stops yt-dlp and removes the row and every data/downloads/<id>.* file', async () => {
+    const added = await api<SourceVideo>(base, 'POST', '/api/videos', { sourceKind: 'youtube', youtubeUrl: watch(ids.slowDownload), language: 'zh' })
+    expect(added.status).toBe(200)
+    const id = added.body.id
+    await waitUntil(async () => downloadFiles(id).some(name => name.endsWith('.part')))
+    const running = (await api<SourceVideo>(base, 'GET', `/api/videos/${id}`)).body
+    expect(running.analysis).toMatchObject({ status: 'running', step: 'download' })
+    expect(running.filePath).toBeNull()
+    const download = readArgsLogs(ytdlpLogDir, ids.slowDownload).find(log => log.mode === 'video')
+    expect(download).toBeDefined()
+
+    const del = await api(base, 'DELETE', `/api/videos/${id}`)
+    expect([del.status, del.body]).toEqual([200, { ok: true }])
+    expect((await api(base, 'GET', `/api/videos/${id}`)).status).toBe(404)
+    expect(downloadFiles(id)).toEqual([])
+    expect(alive(download!.pid)).toBe(false)
+    // nothing comes back once yt-dlp is gone
+    await new Promise(resolve => setTimeout(resolve, 1000))
+    expect(downloadFiles(id)).toEqual([])
+    expect(fs.existsSync(path.join(dataDir, 'videos', id))).toBe(false)
+    // the other video's download is untouched
+    expect(downloadFiles(video.id).length).toBeGreaterThan(0)
+    expect(server.output()).not.toMatch(/工作意外失敗|unhandled/i)
+  })
+})
+
 describe('restart recovery (startup plugin)', () => {
   /** A second data folder, served by servers that are stopped or killed mid-Analysis. */
   async function restartCase(stopWith: 'SIGTERM' | 'SIGKILL') {
@@ -841,6 +1043,40 @@ describe('restart recovery (startup plugin)', () => {
 
   it('re-runs an Analysis interrupted by a crash', async () => {
     await restartCase('SIGKILL')
+  })
+
+  it('deletes the files in data/downloads that belong to no video, before any download starts', async () => {
+    const caseDir = await fsp.mkdtemp(path.join(tmp, 'orphan-downloads-'))
+    const env = { GG_DATA_DIR: path.join(caseDir, 'data'), GG_FONTS_DIR: fontsDir(), GG_FAKE_YTDLP_LOG_DIR: caseDir }
+    const downloads = path.join(caseDir, 'data', 'downloads')
+    // A YouTube video whose download fails (the fake yt-dlp has no media to copy), so its row stays.
+    const first = await startServer(env)
+    let keptId = ''
+    try {
+      const added = await api<SourceVideo>(first.url, 'POST', '/api/videos', { sourceKind: 'youtube', youtubeUrl: `https://youtu.be/${FAKE_YTDLP_IDS.noChat}`, language: 'zh' })
+      expect(added.status).toBe(200)
+      keptId = added.body.id
+      await waitUntil(async () => (await api<SourceVideo>(first.url, 'GET', `/api/videos/${keptId}`)).body.analysis.status === 'failed')
+    }
+    finally {
+      await first.stop()
+    }
+
+    const orphan = '0f0f0f0f-1111-4222-8333-444444444444'
+    const kept = [`${keptId}.mp4.part`, `${keptId}.live_chat.json`, 'notes.txt', 'NOT-AN-ID.mp4']
+    await fsp.mkdir(downloads, { recursive: true })
+    for (const name of [...kept, `${orphan}.mp4`, `${orphan}.f137.mp4.part`, `${orphan}.live_chat.json`]) {
+      await fsp.writeFile(path.join(downloads, name), 'x')
+    }
+    await fsp.mkdir(path.join(downloads, `${orphan}.folder`))
+    const next = await startServer(env)
+    try {
+      await waitUntil(async () => next.output().includes('清掉 3 個不屬於任何影片的下載檔'), 10_000)
+      expect(fs.readdirSync(downloads).sort()).toEqual([...kept, `${orphan}.folder`].sort())
+    }
+    finally {
+      await next.stop()
+    }
   })
 })
 

@@ -5,7 +5,10 @@ import { isFile } from '../../../lib/jobs'
 import { toSourceVideo } from '../../../lib/library'
 import { useServices } from '../../../lib/services'
 
-/** 重新分析: 'highlights' keeps the Transcript, 'full' transcribes again (design.md「重新分析」). */
+/**
+ * 重新分析: 'highlights' keeps the Transcript, 'full' transcribes again (design.md「重新分析」); a YouTube
+ * video may run 'full' without its downloaded file (the download step gets it again).
+ */
 export default defineEventHandler(async (event): Promise<SourceVideo> => {
   const { repos, analysis } = useServices()
   const id = getVideoOr404(repos, getRouterParam(event, 'id')).id

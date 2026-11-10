@@ -2,12 +2,18 @@
 // The webServer builds the app when the sources changed, then runs the production server on a free
 // port with a fresh data folder, the tiny ASR model on CPU and libx264. A fake Ollama
 // (server/lib/llm/test-helpers/fake-ollama.mjs, scenario 'ok') stands in for the local LLM; specs
-// switch its scenario with POST $GG_E2E_OLLAMA_URL/__scenario.
+// switch its scenario with POST $GG_E2E_OLLAMA_URL/__scenario. A fake yt-dlp
+// (server/lib/youtube/test-helpers/fake-yt-dlp.mjs) stands in for YouTube: the video id in the link
+// picks the scenario, and a download copies the 60 s highlights-zh.mkv fixture.
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { defineConfig } from '@playwright/test'
+import { FIXTURES_DIR } from './tests/fixtures/make-fixtures.mjs'
+
+const rootDir = path.dirname(fileURLToPath(import.meta.url))
 
 // Playwright loads this file in the runner and again in every worker: pick the port and the data
 // folder once and hand them to the workers through the environment they inherit.
@@ -82,6 +88,16 @@ export default defineConfig({
       GG_VIDEO_ENCODER: 'libx264',
       GG_OLLAMA_URL: ollamaUrl,
       GG_OLLAMA_MODEL: 'qwen3.5:9b',
+      // never the real yt-dlp (and no install or update into tools/)
+      GG_YTDLP_CMD: JSON.stringify([process.execPath, path.join(rootDir, 'server', 'lib', 'youtube', 'test-helpers', 'fake-yt-dlp.mjs')]),
+      GG_FAKE_YTDLP_MEDIA: path.join(FIXTURES_DIR, 'highlights-zh.mkv'),
+      GG_FAKE_YTDLP_DURATION: '60',
+      // the heatmap burst at 33–39 s: with the default (20–26 s) it starts inside the first 30 s, which
+      // the heatmap Signal flattens (design.md「重播熱度」step 2), so the Signal would be missing
+      GG_FAKE_YTDLP_HEATMAP_PEAK: '36',
+      // ggSlowDl001's download takes 50 steps × 1 s: youtube.spec.ts removes the video while it runs
+      GG_FAKE_YTDLP_SLOW_MS: '1000',
+      GG_FAKE_YTDLP_LOG_DIR: path.join(process.env.GG_E2E_DATA_DIR!, 'fake-yt-dlp-logs'),
     },
   }],
 })

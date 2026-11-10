@@ -29,8 +29,11 @@ export interface RunYtdlpOptions {
   signal?: AbortSignal
   /** WARNING lines as they come, and the output of a failed run. */
   log?: (message: string) => void
-  /** Every stdout line (not called when `collectStdout` is set). */
-  onStdoutLine?: (line: string) => void
+  /**
+   * Every output line of either stream, untrimmed (stdout lines only when `collectStdout` is not set).
+   * yt-dlp prints the progress template and `--print` to stdout, but reading both costs nothing.
+   */
+  onLine?: (line: string) => void
   /** Keep stdout as one string instead of lines (`-J` prints one possibly multi-megabyte line). */
   collectStdout?: boolean
 }
@@ -48,6 +51,12 @@ export async function runYtdlp(config: Pick<YtdlpConfig, 'command'>, args: strin
     if (tail.length > TAIL_LINES) tail.shift()
   }
   const onLine = (line: string) => {
+    try {
+      opts.onLine?.(line)
+    }
+    catch (err) {
+      console.warn('[yt-dlp] line handler failed:', err)
+    }
     const trimmed = line.trim()
     // Progress lines (one per second for hours) would push everything useful out of the tail.
     if (trimmed === '' || trimmed.startsWith('GGDL ')) return
@@ -60,12 +69,7 @@ export async function runYtdlp(config: Pick<YtdlpConfig, 'command'>, args: strin
     const result = await runCli(config.command, args, {
       signal: opts.signal,
       messages: YTDLP_CLI_MESSAGES,
-      onLine: opts.collectStdout
-        ? undefined
-        : (line) => {
-            onLine(line)
-            opts.onStdoutLine?.(line)
-          },
+      onLine: opts.collectStdout ? undefined : onLine,
       onStdoutData: opts.collectStdout ? chunk => chunks.push(chunk) : undefined,
       onStderrLine: onLine,
     })

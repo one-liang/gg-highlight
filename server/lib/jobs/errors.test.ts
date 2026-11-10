@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { readableError, stripStackTrace } from './errors'
+import { mapYtdlpError, YTDLP_ERROR_MESSAGES, YtdlpError } from '../youtube'
+import { readableError, stripStackTrace, ytdlpReason } from './errors'
 
 describe('stripStackTrace', () => {
   it('drops JavaScript stack frames', () => {
@@ -54,9 +55,29 @@ describe('readableError', () => {
     expect(text).toContain('Invalid data')
   })
 
+  it('prefixes yt-dlp failures with the step and keeps their Chinese text (never the raw ERROR: line alone)', () => {
+    const outdated = mapYtdlpError(['ERROR: unable to download video data: HTTP Error 403: Forbidden'], { code: 1 })
+    expect(readableError(outdated, '下載影片')).toBe(`下載影片失敗：${YTDLP_ERROR_MESSAGES.outdated}`)
+    expect(readableError(outdated, '下載影片')).toMatch(/^下載影片失敗：YouTube 可能改版了/)
+    // an unknown ERROR line: 下載影片失敗：<line>, not 下載影片失敗：下載失敗：…
+    const unknown = mapYtdlpError(['ERROR: [youtube] abc: Something new happened'], { code: 1 })
+    expect(unknown.message).toBe('下載失敗：ERROR: [youtube] abc: Something new happened')
+    expect(readableError(unknown, '下載影片')).toBe('下載影片失敗：ERROR: [youtube] abc: Something new happened')
+    expect(ytdlpReason(unknown)).toBe('ERROR: [youtube] abc: Something new happened')
+    expect(ytdlpReason(outdated)).toBe(YTDLP_ERROR_MESSAGES.outdated)
+  })
+
+  it('shows the live-status rejections as they are', () => {
+    expect(readableError(new YtdlpError('live', YTDLP_ERROR_MESSAGES.live!), '下載影片')).toBe(YTDLP_ERROR_MESSAGES.live)
+    expect(readableError(new YtdlpError('post-live', YTDLP_ERROR_MESSAGES['post-live']!), '下載影片')).toBe(YTDLP_ERROR_MESSAGES['post-live'])
+  })
+
   it('cuts very long messages', () => {
     const text = readableError(new Error(`失敗${'x'.repeat(5000)}`), '輸出剪輯')
     expect(text.length).toBeLessThanOrEqual(1200)
     expect(text.endsWith('…')).toBe(true)
+    const long = readableError(new YtdlpError('unknown', `下載失敗：ERROR: ${'x'.repeat(5000)}`), '下載影片')
+    expect(long.length).toBeLessThanOrEqual(1200)
+    expect(long.startsWith('下載影片失敗：ERROR: x')).toBe(true)
   })
 })

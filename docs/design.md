@@ -172,6 +172,8 @@
   | 找不到 yt-dlp 執行檔 | 找不到 yt-dlp，請重新執行 setup.bat |
   | 其他 | 下載失敗：`<原始 ERROR 行>`（完整輸出寫進 log）|
 
+  比對時較明確的句子優先：「live stream recording is not available」與「Requested format is not available」不算「is not available」，YouTube 限流時的「This content isn't available, try again later」算暫時拒絕；有好幾行 `ERROR:` 時用最先符合的規則（依上述優先順序），「其他」用最後一行。
+  分析失敗時存成「下載影片失敗：<顯示>」（「其他」是「下載影片失敗：<原始 ERROR 行>」）；直播狀態不符（直播中、剛結束、不是單一影片）的訊息照原樣顯示，不加前綴。讀取影片資訊最多等 90 秒，逾時是「向 YouTube 讀取影片資訊逾時，請稍後再試」。
   「可能改版了」與「其他」兩種情況會讓下次啟動一定檢查 yt-dlp 更新（刪掉檢查紀錄，見「啟動」）。
 - 「只重新找精華片段」不下載影片檔；它在 `signals` 步驟開頭重新讀一次影片資訊（只拿重播熱度，最多等 90 秒；失敗就用 `signals.json` 裡上次的重播熱度，寫進 log），聊天室檔案不存在而影片資訊說有聊天室重播時也再下載一次（之前聊天室下載失敗的補救方法）。這時 `signals` 步驟內進度：YouTube 資料 10%、音量 10%、AI 讀逐字稿 80%。
 
@@ -185,7 +187,7 @@
 4. 觀眾看到、打字送出需要時間：第 s 秒的密度 `r[s]` = 時間落在 `[s+5, s+25)` 的訊息權重總和（常數 `CHAT_LAG_START_SEC`、`CHAT_WINDOW_SEC` 可調；文獻的延遲從 7 秒到 25 秒都有，台灣實況多用低延遲）。
 5. 和平常比：`b[s]` = `r` 前後各 150 秒的中位數（至少 1）；`z = 2(√(r+3/8) − √(b+3/8))`；分數 = `clamp01(min((log2(r/b) − 1) ÷ (log2 6 − 1), (z − 3) ÷ 3))`：比平常多 2 倍而且 `z ≥ 3` 開始計分，6 倍而且 `z ≥ 6` 滿分。`r < 3`，或窗口裡不到 3 位發言者時為 0（避免一兩個人洗版造成假高點）。
 6. 整支影片算進來的訊息（權重大於 0）平均每小時不到 120 則 → `missing`「聊天室訊息太少（平均每分鐘不到 2 則），不採用」：很平的聊天室訊號會被算進權重（1.5），讓音量與逐字稿的高點都變低，違反「缺少的訊號不扣分」。常數 `CHAT_MIN_PER_HOUR`。
-7. 其他 `missing` 原因：影片資訊沒有聊天室重播 →「這支影片沒有聊天室重播（不是直播重播，或重播剪輯過）」；下載失敗 →「聊天室重播下載失敗：<錯誤>」；檔案讀不到 →「讀不到聊天室重播檔」。`used` 時 `reason` 寫「平均每分鐘 N 則」。分析 log 記下每小時則數與判斷。
+7. 其他 `missing` 原因：影片資訊沒有聊天室重播 →「這支影片沒有聊天室重播（不是直播重播，或重播剪輯過）」；下載失敗 →「聊天室重播下載失敗：<錯誤>」；檔案讀不到 →「讀不到聊天室重播檔」。`used` 時 `reason` 寫「平均每分鐘 N 則」（N 不到 10 時取到小數一位，例如 2.5；10 以上取整數）。分析 log 記下每小時則數與判斷。
 
 #### 重播熱度（`heatmap` 訊號）
 
@@ -196,7 +198,7 @@ YouTube 的「最常重播」：觀看次數夠多（大約數萬以上）的影
 3. `m` = 中位數、`top` = 最大值；`top − m < 0.1` → `missing`「重播熱度沒有明顯起伏」。
 4. 每段分數 `s = clamp01(((v − m) ÷ (top − m) − 0.3) ÷ 0.4)`。
 5. 每秒的值：在各段中點之間線性內插（第 k 秒取 `k + 0.5` 的位置），第一個中點之前、最後一個中點之後維持端點的值；超過最後一段結束時間再加一段長度的秒數沒有值（`covered` 為 0）。不另外平滑（合成分數時已有 5 秒移動平均）。
-6. 結果（原始陣列與取得時間）存進 `signals.json`；「只重新找精華片段」會重新讀（後來才出現的重播熱度也會用到），讀不到就用上次的。
+6. 結果（原始陣列與取得時間）存進 `signals.json`；「只重新找精華片段」會重新讀（後來才出現的重播熱度也會用到），讀取失敗或這次讀到的資訊沒有重播熱度時，就用 `signals.json` 裡上次的（避免被 YouTube 限流時讀到不完整的資訊）。
 7. `missing` 原因：沒有 →「這支影片沒有 YouTube 重播熱度（觀看次數不夠多或影片太新）」；讀取失敗而且沒有上次的 →「無法取得重播熱度：<錯誤>」。
 
 #### 其他
@@ -235,7 +237,7 @@ server/lib/services.ts   把上面組起來的單例（給 API routes 用）
 shared/types/domain.ts   前後端共用型別
 shared/utils/            前後端共用的純函式（YouTube 連結解析）
 transcriber/             Python（uv 管理）：gg-transcribe CLI
-scripts/                 start.mjs、doctor.mjs、fetch-fonts.mjs、setup.ps1
+scripts/                 start.mjs、doctor.mjs、ytdlp.mjs、fetch-fonts.mjs、setup.ps1
 tests/                   測試素材產生器、整合測試、e2e
 ```
 
@@ -302,14 +304,14 @@ data/downloads/<videoId>.<ext> YouTube 下載的影片檔；<videoId>.live_chat.
 
 | 狀態碼 | 用在 |
 | --- | --- |
-| 400 | 請求格式不對：不是 JSON、欄位型別或必填欄位錯、逐字稿文字空白或超過 200 字、缺少 `X-File-Name` |
+| 400 | 請求格式不對：不是 JSON、欄位型別或必填欄位錯、逐字稿文字空白或超過 200 字、缺少 `X-File-Name`、沒有 YouTube 連結（「請貼上 YouTube 影片連結」）、不是 YouTube 的連結、YouTube 影片的音軌不是 0（「YouTube 影片只有一條音軌，音軌必須是 0」） |
 | 403 | 路徑不在設定的影片資料夾內（`POST /api/videos`、`POST /api/probe`） |
 | 404 | 找不到影片／精華片段／剪輯／檔案，或沒有這個 API |
 | 405 | 這個 API 路徑不支援這個方法（回應帶 `Allow`；`HEAD` 視同沒有本文的 `GET`） |
-| 409 | 狀態不允許：同一路徑重複加入、只有 `failed` 可以重試、逐字稿不能用時不能輸出／改逐字稿／新增或調整精華片段（「只重新找精華片段」與之前分析完成過的 `full` 失敗除外，見「重新分析」）、影片資訊還沒讀取完成、重新分析或 `full` 重試的條件不符（見「重新分析」） |
+| 409 | 狀態不允許：同一路徑或同一支 YouTube 影片重複加入（「這支影片已在影片庫」）、只有 `failed` 可以重試、逐字稿不能用時不能輸出／改逐字稿／新增或調整精華片段（「只重新找精華片段」與之前分析完成過的 `full` 失敗除外，見「重新分析」）、影片資訊還沒讀取完成、重新分析或 `full` 重試的條件不符（見「重新分析」） |
 | 415 | 上傳的副檔名不是影片 |
 | 422 | 內容不合理：精華片段範圍不對、讀不到影片檔、分析用音軌不存在、原始影片檔不見了無法輸出或重新辨識語音、YouTube 播放清單或頻道連結、直播中／還沒開始／剛結束還在處理的直播、私人／會員限定／有年齡限制／地區限制／已移除的影片 |
-| 502 | 向 YouTube 讀取影片資訊失敗：被 YouTube 暫時拒絕、網路問題、yt-dlp 不見了或需要更新（訊息同「YouTube」的錯誤對照表） |
+| 502 | 向 YouTube 讀取影片資訊失敗：被 YouTube 暫時拒絕、網路問題、逾時、yt-dlp 不見了或需要更新（訊息同「YouTube」的錯誤對照表；其他非預期的錯誤是「向 YouTube 讀取影片資訊失敗，請稍後再試」） |
 
 任何沒有 route 處理的 `/api/**` 請求（包括已知路徑配上錯的方法）都回 JSON 404／405，不會落到 SPA 頁面。
 
@@ -350,7 +352,7 @@ data/downloads/<videoId>.<ext> YouTube 下載的影片檔；<videoId>.live_chat.
 
 - `pnpm test`（Vitest）：純函式單元測試＋用真的 ffmpeg 跑的整合測試。測試素材由 `tests/fixtures/make-fixtures.mjs` 產生（espeak-ng 合成語音 + testsrc2 畫面，含雙音軌 mkv，以及給候選精華片段用的一分鐘影片 `highlights-zh.mkv`：開頭是中文語音，40–46 秒有一段只有音量訊號找得到的大聲響）。
 - 轉錄整合測試用 `Systran/faster-whisper-tiny` 在 CPU 上跑。
-- yt-dlp 一律用假的（`server/lib/youtube/test-helpers/fake-yt-dlp.mjs`，由 `GG_YTDLP_CMD` 指定）：依連結裡的影片 ID 決定情境（直播重播含聊天室與重播熱度、沒有聊天室、沒有重播熱度、直播中、私人影片、聊天室下載失敗、下載 403、下載很慢），下載時複製 `GG_FAKE_YTDLP_MEDIA` 指定的測試影片並印出進度。雲端環境下載不了 YouTube 影片（Google 拒絕資料中心的 IP）；真的下載由使用者在 Windows 上確認。
+- yt-dlp 一律用假的（`server/lib/youtube/test-helpers/fake-yt-dlp.mjs`，由 `GG_YTDLP_CMD` 指定）：依連結裡的影片 ID 決定情境（直播重播含聊天室與重播熱度、沒有聊天室、沒有重播熱度、直播中、私人影片、聊天室下載失敗、下載 403、下載很慢），下載時複製 `GG_FAKE_YTDLP_MEDIA` 指定的測試影片並印出進度。整合測試（`tests/integration/server.ts`）與 e2e（`playwright.config.ts`）啟動的伺服器預設都用它。雲端環境下載不了 YouTube 影片（Google 拒絕資料中心的 IP）；真的下載由使用者在 Windows 上確認。
 - 雲端開發環境沒有顯示卡：NVENC、CUDA、Breeze 的實際效果由使用者在 Windows 上確認。
-- `pnpm test:e2e`（Playwright）：啟動整個 app 走一次「加入影片 → 分析 → 改逐字稿 → 新增精華片段 → 輸出剪輯」，以及「候選精華片段 → 選用 → 輸出 → 重新分析（只重新找精華片段，保留修改與選用的片段）→ Ollama 沒有模型時只用音量 → 設定頁的 Ollama 狀態 → 舊影片的提示」，和「YouTube：貼連結 → 讀取資訊 → 下載並分析 → 候選依據列出聊天室與重播熱度 → 移除後下載檔刪除」與錯誤情境。
+- `pnpm test:e2e`（Playwright）：啟動整個 app 走一次「加入影片 → 分析 → 改逐字稿 → 新增精華片段 → 輸出剪輯」，以及「候選精華片段 → 選用 → 輸出 → 重新分析（只重新找精華片段，保留修改與選用的片段）→ Ollama 沒有模型時只用音量 → 設定頁的 Ollama 狀態 → 舊影片的提示」，和「YouTube：貼連結 → 讀取資訊 → 下載並分析 → 候選依據列出聊天室與重播熱度 → 同一支影片再貼一次是重複 → 移除後下載檔刪除」、下載中移除（下載到一半的檔案一起刪除），與錯誤情境（播放清單、不是 YouTube、私人影片、直播中）。
 - Ollama 一律用假的 HTTP 伺服器（`server/lib/llm/test-helpers/fake-ollama.mjs`）：單元、整合、e2e 共用，可以模擬正常、沒有模型、連不到、回應壞掉、卡住。e2e 由 `playwright.config.ts` 啟動它（`webServer`，情境 `ok`），測試用 `POST $GG_E2E_OLLAMA_URL/__scenario` 切換情境。雲端環境不能執行真的 Ollama；實際模型的效果由使用者在 Windows 上確認。

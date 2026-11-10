@@ -3,7 +3,11 @@ import { getVideoOr404 } from '../../../lib/api'
 import { removeVideoFiles } from '../../../lib/library'
 import { useServices } from '../../../lib/services'
 
-/** Removes the video from the Library: stops its jobs, deletes its rows, then its files inside data/. */
+/**
+ * Removes the video from the Library: stops its jobs and waits for them (a running yt-dlp download is
+ * killed first), deletes its rows, then its files inside data/ (for YouTube every downloads/<id>.*,
+ * partial files included, even before the download finished).
+ */
 export default defineEventHandler(async (event): Promise<{ ok: true }> => {
   const { config, repos, analysis, exports } = useServices()
   const video = getVideoOr404(repos, getRouterParam(event, 'id'))

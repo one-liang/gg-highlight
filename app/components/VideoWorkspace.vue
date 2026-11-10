@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { Clip, ClipStatus, Highlight, SourceVideo, TranscriptSegment } from '~~/shared/types/domain'
 import type { HighlightEditDraft } from '~/types/highlight-edit'
+import { cannotExportText, cannotPreviewText } from '~/utils/analysis'
 import { videoMediaUrl } from '~/utils/api-urls'
 import { goneHighlightRefs, sortHighlights, upsertHighlight, validRange } from '~/utils/highlights'
 import { isAnalysisActive, isClipActive, layoutLabels } from '~/utils/labels'
@@ -43,6 +44,8 @@ const { mediaError } = player
 
 const duration = computed(() => props.video.media?.durationSec ?? 0)
 const canPreview = computed(() => !props.video.fileMissing)
+const noPreviewText = computed(() => cannotPreviewText(props.video))
+const noExportText = computed(() => cannotExportText(props.video))
 const mediaUrl = computed(() => videoMediaUrl(props.video.id))
 const sourceAspect = computed(() => {
   const m = props.video.media
@@ -142,7 +145,7 @@ function onSegmentUpdated(seg: TranscriptSegment) {
         <div v-else class="absolute inset-0 flex flex-col items-center justify-center gap-2 p-6 text-center text-white/80">
           <UIcon name="i-lucide-video-off" class="size-8" />
           <p class="font-medium">
-            找不到原始影片檔，無法預覽
+            {{ noPreviewText }}
           </p>
         </div>
         <div
@@ -192,6 +195,7 @@ function onSegmentUpdated(seg: TranscriptSegment) {
         :loaded="highlightsRes.loaded.value"
         :error="highlightsRes.error.value?.message ?? null"
         :can-preview="canPreview"
+        :cannot-export-text="noExportText"
         :focused-id="focusedId"
         :clip-counts="clipCounts"
         :signals="video.analysis.signals ?? null"

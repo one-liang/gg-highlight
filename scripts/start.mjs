@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Launcher used by start.bat: install → build when the source changed → run the server → open the browser.
+// Launcher used by start.bat: install → build when the source changed → install / update yt-dlp →
+// run the server → open the browser.
 //
 //   node scripts/start.mjs [--no-open]
 import { spawn } from 'node:child_process'
@@ -20,6 +21,7 @@ import {
   runCommand,
   runInherited,
 } from './lib/common.mjs'
+import { ensure as ensureYtdlp } from './ytdlp.mjs'
 
 /** Folders and files whose changes require a new `pnpm build`. */
 export const STAMP_DIRS = ['app', 'server', 'shared']
@@ -398,6 +400,10 @@ export async function main({
     }
     await writeBuildStamp(root, stamp)
   }
+
+  // yt-dlp for YouTube (ADR-0003), before the server starts so no file it may run gets replaced.
+  // Skipped with GG_YTDLP_CMD; a failure only warns, since only YouTube needs it.
+  await ensureYtdlp({ root, env, platform, log })
 
   log(`▶ 啟動伺服器（${baseUrl}）…`)
   const child = spawn(process.execPath, [path.join(root, SERVER_ENTRY)], {

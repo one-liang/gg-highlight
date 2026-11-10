@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { AnalysisMode, SourceVideo, TranscriptSegment } from '~~/shared/types/domain'
-import { countEditedSegments, defaultReanalyzeMode, FULL_NEEDS_SOURCE_MESSAGE } from '~/utils/analysis'
+import { countEditedSegments, defaultReanalyzeMode, reanalyzeOptions } from '~/utils/analysis'
 
 const props = defineProps<{
   video: SourceVideo
@@ -20,22 +20,13 @@ const transcriptFailed = ref(false)
 let touched = false
 let loadSeq = 0
 
-const OPTIONS: { value: AnalysisMode, title: string, description: string }[] = [
-  {
-    value: 'highlights',
-    title: '只重新找精華片段',
-    description: '保留逐字稿與你的修改，只重新計算音量與逐字稿訊號、產生新的候選，通常幾分鐘內完成。執行期間逐字稿、精華片段與剪輯照常可以使用。',
-  },
-  {
-    value: 'full',
-    title: '重新辨識語音並找精華',
-    description: '逐字稿重新產生，你的修改會被覆蓋。要套用新版的逐字稿清理（例如重複出現的字）時用這個。完成前看不到逐字稿、精華片段與剪輯。',
-  },
-]
-
-/** 'full' transcribes the source file again: impossible while it is missing (the API answers 422). */
-const fullUnavailable = computed(() => props.video.fileMissing)
-const isDisabled = (value: AnalysisMode) => value === 'full' && fullUnavailable.value
+/**
+ * 'full' transcribes the source file again: impossible while a local file is missing (the API answers
+ * 422); a YouTube video's download step downloads a missing file again, so it only gets a note.
+ */
+const options = computed(() => reanalyzeOptions(props.video))
+const fullUnavailable = computed(() => options.value.some(o => o.value === 'full' && o.disabled))
+const isDisabled = (value: AnalysisMode) => options.value.some(o => o.value === value && o.disabled)
 
 const recommended = computed<AnalysisMode | null>(() => (loadingTranscript.value ? null : defaultReanalyzeMode(props.video, editedCount.value)))
 
@@ -105,7 +96,7 @@ async function submit() {
           </legend>
           <div class="space-y-3">
             <label
-              v-for="o in OPTIONS"
+              v-for="o in options"
               :key="o.value"
               class="relative flex gap-3 rounded-lg border p-3 transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-primary"
               :class="[
@@ -134,8 +125,11 @@ async function submit() {
                   <UBadge v-if="recommended === o.value" label="建議" size="sm" color="neutral" variant="soft" />
                 </span>
                 <span class="block text-xs leading-relaxed text-muted">{{ o.description }}</span>
-                <span v-if="isDisabled(o.value)" class="flex items-start gap-1 text-xs text-warning">
-                  <UIcon name="i-lucide-file-warning" class="mt-px size-3.5 shrink-0" />{{ FULL_NEEDS_SOURCE_MESSAGE }}
+                <span v-if="o.note?.tone === 'warning'" class="flex items-start gap-1 text-xs text-warning">
+                  <UIcon name="i-lucide-file-warning" class="mt-px size-3.5 shrink-0" />{{ o.note.text }}
+                </span>
+                <span v-else-if="o.note" class="flex items-start gap-1 text-xs text-toned" data-testid="reanalyze-redownload">
+                  <UIcon name="i-lucide-download" class="mt-px size-3.5 shrink-0" />{{ o.note.text }}
                 </span>
               </span>
             </label>

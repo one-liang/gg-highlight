@@ -7,11 +7,12 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { AnalysisMode, AnalysisStatus } from '../../../shared/types/domain'
 import { startFakeOllama } from '../llm/test-helpers/fake-ollama.mjs'
 import {
-  addVideoSchema, allowedMethods, asHttpError, checkHighlightRange, checkReanalyze, clipDownloadName, createClipSchema, END_SLACK_SECONDS, fileNameClock,
-  httpError, isHttpError, normalizeWatchFolders, NOT_READY_MESSAGES, ollamaInfo, parseIndexParam, parseWith, reanalyzeSchema,
-  REANALYZE_BUSY_MESSAGE, REANALYZE_CLIPS_BUSY_MESSAGE, REANALYZE_MISSING_SOURCE_MESSAGE, REANALYZE_NO_TRANSCRIPT_MESSAGE,
-  requireTranscriptReady, safeFileNamePart, settingsSchema, titleFromFileName, transcriptReady, unreadableVideo,
-  updateHighlightSchema, updateSegmentSchema,
+  addVideoSchema, allowedMethods, asHttpError, canTranscribe, checkHighlightRange, checkReanalyze, clipDownloadName, createClipSchema,
+  END_SLACK_SECONDS, fileNameClock, httpError, isHttpError, missingFileMessage, normalizeWatchFolders, NOT_READY_MESSAGES, ollamaInfo,
+  parseIndexParam, parseWith, reanalyzeSchema, REANALYZE_BUSY_MESSAGE, REANALYZE_CLIPS_BUSY_MESSAGE, REANALYZE_MISSING_SOURCE_MESSAGE,
+  REANALYZE_NO_TRANSCRIPT_MESSAGE, requireTranscriptReady, safeFileNamePart, settingsSchema, titleFromFileName, transcriptReady,
+  unreadableVideo, updateHighlightSchema, updateSegmentSchema, YOUTUBE_AUDIO_TRACK_MESSAGE, YOUTUBE_URL_REQUIRED_MESSAGE,
+  youtubeProbeSchema,
 } from '.'
 
 function statusOf(fn: () => unknown): { statusCode: number, statusMessage: string } {
@@ -70,7 +71,31 @@ describe('validation', () => {
     expect(statusOf(() => parseWith(addVideoSchema, null))).toEqual({ statusCode: 400, statusMessage: '請求內容必須是 JSON 物件' })
     expect(statusOf(() => parseWith(addVideoSchema, { sourceKind: 'upload', language: 'zh', audioTrack: 1.5 })).statusMessage).toBe('音軌必須是整數')
     expect(statusOf(() => parseWith(addVideoSchema, { sourceKind: 'upload', language: 'zh', audioTrack: -1 })).statusMessage).toBe('音軌不能小於 0')
-    expect(statusOf(() => parseWith(addVideoSchema, { sourceKind: 'x', language: 'zh' })).statusMessage).toBe('來源必須是 watch-folder 或 upload')
+    expect(statusOf(() => parseWith(addVideoSchema, { sourceKind: 'x', language: 'zh' })).statusMessage).toBe('來源必須是 watch-folder、upload 或 youtube')
+  })
+
+  it('addVideoSchema: YouTube needs a link and audio track 0 (defaulted when left out)', () => {
+    const url = 'https://youtu.be/dQw4w9WgXcQ'
+    expect(parseWith(addVideoSchema, { sourceKind: 'youtube', youtubeUrl: url, language: 'zh' })).toEqual({ sourceKind: 'youtube', youtubeUrl: url, language: 'zh', audioTrack: 0 })
+    expect(parseWith(addVideoSchema, { sourceKind: 'youtube', youtubeUrl: url, language: 'en', audioTrack: 0 }).audioTrack).toBe(0)
+    for (const body of [{ sourceKind: 'youtube', language: 'zh' }, { sourceKind: 'youtube', youtubeUrl: '  ', language: 'zh', audioTrack: 1 }]) {
+      expect(statusOf(() => parseWith(addVideoSchema, body))).toEqual({ statusCode: 400, statusMessage: YOUTUBE_URL_REQUIRED_MESSAGE })
+    }
+    for (const audioTrack of [1, 3]) {
+      expect(statusOf(() => parseWith(addVideoSchema, { sourceKind: 'youtube', youtubeUrl: url, language: 'zh', audioTrack }))).toEqual({ statusCode: 400, statusMessage: YOUTUBE_AUDIO_TRACK_MESSAGE })
+    }
+    expect(statusOf(() => parseWith(addVideoSchema, { sourceKind: 'youtube', youtubeUrl: 3, language: 'zh' })).statusMessage).toBe('YouTube 連結必須是文字')
+    expect(statusOf(() => parseWith(addVideoSchema, { sourceKind: 'youtube', youtubeUrl: url, language: 'fr' })).statusMessage).toContain('語言')
+    // other sources ignore youtubeUrl and keep their own audio track rules
+    expect(parseWith(addVideoSchema, { sourceKind: 'upload', uploadId: 'u', youtubeUrl: url, language: 'zh', audioTrack: 2 }).audioTrack).toBe(2)
+  })
+
+  it('youtubeProbeSchema wants a non-blank url (trimmed)', () => {
+    expect(parseWith(youtubeProbeSchema, { url: '  https://youtu.be/dQw4w9WgXcQ ' })).toEqual({ url: 'https://youtu.be/dQw4w9WgXcQ' })
+    for (const bad of [{}, { url: '' }, { url: '   ' }, { url: 42 }]) {
+      expect(statusOf(() => parseWith(youtubeProbeSchema, bad)), JSON.stringify(bad)).toEqual({ statusCode: 400, statusMessage: YOUTUBE_URL_REQUIRED_MESSAGE })
+    }
+    expect(statusOf(() => parseWith(youtubeProbeSchema, null))).toEqual({ statusCode: 400, statusMessage: '請求內容必須是 JSON 物件' })
   })
 
   it('updateSegmentSchema trims and limits to 200 characters (by code point)', () => {
@@ -264,6 +289,25 @@ describe('re-analysis rules', () => {
     expect(statusOf(() => checkReanalyze(video('done', 'highlights'), 'full', { activeClips: 0, sourceExists: false }))).toEqual({ statusCode: 422, statusMessage: REANALYZE_MISSING_SOURCE_MESSAGE })
   })
 
+  it('checkReanalyze: a YouTube video may run full without its downloaded file (the download step gets it again)', () => {
+    const youtube = (status: AnalysisStatus, mode: AnalysisMode) => ({ ...video(status, mode, 2), sourceKind: 'youtube' as const })
+    const missing = { activeClips: 0, sourceExists: false }
+    expect(() => checkReanalyze(youtube('done', 'full'), 'full', missing)).not.toThrow()
+    expect(() => checkReanalyze(youtube('failed', 'full'), 'full', missing)).not.toThrow()
+    expect(() => checkReanalyze(youtube('done', 'highlights'), 'highlights', missing)).not.toThrow()
+    // the other rules still apply
+    expect(statusOf(() => checkReanalyze(youtube('running', 'full'), 'full', missing))).toEqual({ statusCode: 409, statusMessage: REANALYZE_BUSY_MESSAGE })
+    expect(statusOf(() => checkReanalyze(youtube('done', 'full'), 'full', { activeClips: 1, sourceExists: false }))).toEqual({ statusCode: 409, statusMessage: REANALYZE_CLIPS_BUSY_MESSAGE })
+    // local videos still need the file
+    for (const sourceKind of ['watch-folder', 'upload'] as const) {
+      expect(statusOf(() => checkReanalyze({ ...video('done', 'full'), sourceKind }, 'full', missing))).toEqual({ statusCode: 422, statusMessage: REANALYZE_MISSING_SOURCE_MESSAGE })
+    }
+    expect(canTranscribe({ sourceKind: 'youtube' }, false)).toBe(true)
+    expect(canTranscribe({ sourceKind: 'upload' }, false)).toBe(false)
+    expect(canTranscribe({ sourceKind: 'watch-folder' }, true)).toBe(true)
+    expect(canTranscribe({}, false)).toBe(false)
+  })
+
   it('reanalyzeSchema takes full or highlights', () => {
     expect(parseWith(reanalyzeSchema, { mode: 'full' })).toEqual({ mode: 'full' })
     expect(parseWith(reanalyzeSchema, { mode: 'highlights' })).toEqual({ mode: 'highlights' })
@@ -271,6 +315,16 @@ describe('re-analysis rules', () => {
       expect(statusOf(() => parseWith(reanalyzeSchema, bad)).statusMessage).toBe('重新分析的方式必須是 full（重新辨識語音並找精華）或 highlights（只重新找精華片段）')
     }
     expect(statusOf(() => parseWith(reanalyzeSchema, null)).statusCode).toBe(400)
+  })
+})
+
+describe('missingFileMessage', () => {
+  it('names the downloaded file for YouTube and the original for local videos', () => {
+    expect(missingFileMessage({ sourceKind: 'watch-folder' }, 'export')).toBe('找不到原始影片檔，無法輸出剪輯')
+    expect(missingFileMessage({ sourceKind: 'upload' }, 'export')).toBe('找不到原始影片檔，無法輸出剪輯')
+    expect(missingFileMessage({ sourceKind: 'youtube' }, 'export')).toBe('找不到下載的影片檔，無法輸出剪輯')
+    expect(missingFileMessage({ sourceKind: 'watch-folder' }, 'media')).toBe('找不到原始影片檔，可能已被移動或刪除')
+    expect(missingFileMessage({ sourceKind: 'youtube' }, 'media')).toBe('找不到下載的影片檔，可能已被刪除')
   })
 })
 

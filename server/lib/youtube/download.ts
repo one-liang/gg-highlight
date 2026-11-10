@@ -9,6 +9,15 @@ import { logFailure, runYtdlp } from './run'
 import { type DownloadChatOptions, type DownloadVideoOptions, type YtdlpConfig, YtdlpError } from './types'
 
 export const CHAT_FAILED_PREFIX = '聊天室重播下載失敗'
+
+/**
+ * The chat Signal's missing reason after downloadChat failed (design.md「聊天室密度」step 7):
+ * 聊天室重播下載失敗：<error>, without repeating the prefix that downloadChat's 'unknown' errors already have.
+ */
+export function chatDownloadFailureReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  return message.startsWith(CHAT_FAILED_PREFIX) ? message : `${CHAT_FAILED_PREFIX}：${message}`
+}
 /** How often the chat .part is read for progress. */
 export const CHAT_POLL_MS = 1000
 /** Bytes read from the end of the chat .part to find the last complete line (lines are ~2 KB). */
@@ -46,7 +55,7 @@ export async function downloadVideo(config: YtdlpConfig, options: DownloadVideoO
     const result = await runYtdlp(config, videoDownloadArgs(config, url, videoId), {
       signal,
       log,
-      onStdoutLine: (line) => {
+      onLine: (line) => {
         const fraction = progress.push(line)
         if (fraction !== null) report(onProgress, fraction)
         const file = parseFileLine(line)
@@ -131,6 +140,8 @@ export interface ChatDownloadInternals {
  * Downloads the live chat replay to <downloadsDir>/<videoId>.live_chat.json, deleting a stale .part
  * first (yt-dlp would append a second copy to it). Success = the final file exists, whatever the exit
  * code. Progress = last written videoOffsetTimeMsec ÷ duration, read from the .part about every second.
+ * Throws the mapped YtdlpError for a known failure (e.g. 'blocked' for HTTP 429), else 'unknown' with
+ * 聊天室重播下載失敗：<last ERROR line or exit status>; or AbortError.
  */
 export async function downloadChat(config: YtdlpConfig, options: DownloadChatOptions, internals: ChatDownloadInternals = {}): Promise<string> {
   const { url, videoId, durationSec, signal, log, onProgress } = options
@@ -171,8 +182,11 @@ export async function downloadChat(config: YtdlpConfig, options: DownloadChatOpt
       return finalPath
     }
     logFailure(log, '下載聊天室重播', result)
-    if (result.errorLines.length > 0) throw mapYtdlpError(result.errorLines, result)
-    throw new YtdlpError('unknown', `${CHAT_FAILED_PREFIX}：yt-dlp 沒有寫出聊天室檔案（${exitStatusText(result)}）`, exitStatusText(result))
+    const mapped = mapYtdlpError(result.errorLines, result)
+    if (mapped.kind !== 'unknown') throw mapped
+    // Not a known case: say it is the chat that failed (the generic text reads like the video download failed).
+    const detail = result.errorLines.at(-1) ?? `yt-dlp 沒有寫出聊天室檔案（${exitStatusText(result)}）`
+    throw new YtdlpError('unknown', `${CHAT_FAILED_PREFIX}：${detail}`, mapped.detail)
   }
   catch (err) {
     await noteUpdateHint(err, config)

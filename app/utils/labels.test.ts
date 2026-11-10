@@ -16,13 +16,16 @@ import {
   layoutLabels,
   LAYOUTS,
   MIN_OLLAMA_VERSION,
+  MISSING_DOWNLOAD_LABEL,
   MISSING_FILE_LABEL,
+  missingFileLabel,
   ollamaFixHint,
   ollamaStatusColors,
   ollamaStatusLabels,
   showsMissingFileLine,
   SIGNAL_ORDER,
   signalLabels,
+  signalNamesFor,
   sourceKindLabels,
   videoEncoderLabels,
 } from './labels'
@@ -57,6 +60,18 @@ describe('labels', () => {
     expect(analysisStepLabel('transcribe')).toBe('語音辨識')
   })
 
+  it('names the Signals of the signals step by source', () => {
+    expect(signalNamesFor('watch-folder')).toBe('音量與逐字稿')
+    expect(signalNamesFor('upload')).toBe('音量與逐字稿')
+    expect(signalNamesFor(null)).toBe('音量與逐字稿')
+    expect(signalNamesFor('youtube')).toBe('音量、逐字稿、聊天室與重播熱度')
+    expect(analysisStepLabel('signals')).toBe('分析音量與逐字稿')
+    expect(analysisStepLabel('signals', 'upload')).toBe('分析音量與逐字稿')
+    expect(analysisStepLabel('signals', 'youtube')).toBe('分析音量、逐字稿、聊天室與重播熱度')
+    expect(analysisStepLabel('download', 'youtube')).toBe('下載影片')
+    expect(analysisStepLabel('transcribe', 'youtube')).toBe('語音辨識')
+  })
+
   it('names statuses, layouts, languages and sources', () => {
     expect(analysisStatusLabels).toEqual({ queued: '排隊中', running: '分析中', done: '完成', failed: '失敗' })
     expect(highlightStatusLabels).toEqual({ candidate: '候選', selected: '選用', dismissed: '捨棄' })
@@ -64,6 +79,7 @@ describe('labels', () => {
     expect(languageLabels).toEqual({ zh: '中文（含中英夾雜）', en: 'English' })
     expect(sourceKindLabels['watch-folder']).toBe('影片資料夾')
     expect(sourceKindLabels.upload).toBe('上傳')
+    expect(sourceKindLabels.youtube).toBe('YouTube')
     expect(videoEncoderLabels.h264_nvenc).toBe('NVIDIA 硬體編碼 NVENC')
     expect(videoEncoderLabels.libx264).toBe('CPU 編碼（較慢）')
     expect(LAYOUTS[0]).toBe('blurred-background')
@@ -126,6 +142,15 @@ describe('analysis steps', () => {
     expect(showsMissingFileLine(v(true, { status: 'done' }))).toBe(true)
     expect(showsMissingFileLine(v(true, { status: 'failed', error: MISSING_FILE_LABEL }))).toBe(false)
     expect(showsMissingFileLine(v(true, { status: 'failed', error: '語音辨識失敗' }))).toBe(true)
+    expect(showsMissingFileLine(v(true, { status: 'failed', error: MISSING_DOWNLOAD_LABEL }))).toBe(false)
+  })
+
+  it('says a YouTube video\'s downloaded file is gone, not the original', () => {
+    expect(MISSING_FILE_LABEL).toBe('找不到原始影片檔')
+    expect(MISSING_DOWNLOAD_LABEL).toBe('下載的影片檔不見了')
+    expect(missingFileLabel({ sourceKind: 'watch-folder' })).toBe(MISSING_FILE_LABEL)
+    expect(missingFileLabel({ sourceKind: 'upload' })).toBe(MISSING_FILE_LABEL)
+    expect(missingFileLabel({ sourceKind: 'youtube' })).toBe(MISSING_DOWNLOAD_LABEL)
   })
 })
 

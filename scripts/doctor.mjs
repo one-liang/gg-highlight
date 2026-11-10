@@ -18,10 +18,11 @@ import {
   projectRoot,
   runCommand,
 } from './lib/common.mjs'
+import { hasCustomCommand, ytdlpPaths } from './ytdlp.mjs'
 
 export { compareVersions, parseVersion } from './lib/common.mjs'
 
-/** @typedef {'ok'|'warn'|'fail'|'later'} CheckStatus  'later' = not in use: a later milestone, or switched off. */
+/** @typedef {'ok'|'warn'|'fail'|'later'} CheckStatus  'later' = not in use: switched off (e.g. GG_OLLAMA_URL=off). */
 /**
  * @typedef {object} CheckResult
  * @property {string} id
@@ -37,6 +38,8 @@ export const ICONS = { ok: '✅', warn: '⚠️', fail: '❌', later: '➖' }
 const TRANSCRIBER_TIMEOUT_MS = 10 * 60_000
 const NVENC_TIMEOUT_MS = 30_000
 const VERSION_TIMEOUT_MS = 30_000
+/** `yt-dlp --version` starts Python and imports yt-dlp; a cold start on a slow disk takes a few seconds. */
+const YTDLP_TIMEOUT_MS = 15_000
 
 // Same values as server/lib/llm/types.ts (doctor.test.ts compares them).
 export const DEFAULT_OLLAMA_URL = 'http://127.0.0.1:11434'
@@ -184,6 +187,16 @@ async function getJson(doFetch, url, signal) {
   catch {
     return null
   }
+}
+
+/** argv prefix of yt-dlp, same rules as server/lib/config.ts: GG_YTDLP_CMD, else tools/bin/yt-dlp(.exe). */
+export function ytdlpCommand(env = process.env, root = projectRoot, platform = process.platform) {
+  if (hasCustomCommand(env)) {
+    const value = env.GG_YTDLP_CMD.trim()
+    if (value.startsWith('[')) return JSON.parse(value)
+    return value.split(/\s+/)
+  }
+  return [ytdlpPaths(root, platform).exe]
 }
 
 /** argv prefix of the transcriber CLI, same rules as server/lib/config.ts. */
@@ -399,21 +412,44 @@ export async function checkOllama(ctx) {
   return result('ollama', label, 'ok', `Ollama ${version}，模型 ${model}`, null, false)
 }
 
-/** Tools for later milestones: listed, never failing. */
-export async function checkLaterTools(ctx) {
-  const tools = [
-    { id: 'deno', label: 'Deno', command: 'deno', why: '里程碑 3「YouTube」才會用到' },
-  ]
-  return Promise.all(tools.map(async (tool) => {
-    const r = await ctx.run(tool.command, ['--version'], { timeoutMs: 10_000 })
-    const installed = r.ok ? `，已安裝 ${lastLine(r.stdout)}` : r.notFound ? '' : '，已安裝'
-    return result(tool.id, tool.label, 'later', `尚未需要（${tool.why}）${installed}`, null, false)
-  }))
+/**
+ * yt-dlp for YouTube links (ADR-0003). Optional: only YouTube needs it, so problems are warnings.
+ * The managed copy in tools/ is installed by setup.bat and start.bat; GG_YTDLP_CMD replaces it.
+ */
+export async function checkYtdlp(ctx) {
+  const label = 'yt-dlp（YouTube 下載）'
+  const warn = (detail, fix) => result('yt-dlp', label, 'warn', detail, fix, false)
+  const youtubeOnly = '在那之前不能加入 YouTube 影片，其他功能不受影響。'
+  const custom = hasCustomCommand(ctx.env)
+  let command
+  try {
+    command = ytdlpCommand(ctx.env, ctx.root, ctx.platform)
+  }
+  catch {
+    return warn('GG_YTDLP_CMD 格式不正確', '改成空白分隔的指令，或 JSON 字串陣列')
+  }
+  if (!Array.isArray(command) || command.length === 0 || command.some(part => typeof part !== 'string' || !part)) {
+    return warn('GG_YTDLP_CMD 格式不正確', '改成空白分隔的指令，或 JSON 字串陣列')
+  }
+  if (!custom) {
+    try {
+      await fsp.access(command[0])
+    }
+    catch {
+      return warn('還沒有安裝', `雙擊 start.bat（啟動時會自動安裝到 tools 資料夾，需要網路），或重新執行 setup.bat。${youtubeOnly}`)
+    }
+  }
+  const r = await ctx.run(command[0], [...command.slice(1), '--version'], { cwd: ctx.root, timeoutMs: YTDLP_TIMEOUT_MS })
+  const version = r.ok ? lastLine(r.stdout) : ''
+  if (r.ok && version) return result('yt-dlp', label, 'ok', custom ? `${version}（GG_YTDLP_CMD）` : version, null, false)
+  const why = r.timedOut ? `${YTDLP_TIMEOUT_MS / 1000} 秒內沒有回應` : r.notFound ? `找不到 ${command[0]}` : errorLine(r.stderr) || r.error || `結束代碼 ${r.code}`
+  if (custom) return warn(`無法執行 GG_YTDLP_CMD：${why}`, '確認 GG_YTDLP_CMD 指向可以執行的 yt-dlp，或刪掉這個環境變數改用程式自己管理的 yt-dlp')
+  return warn(`無法執行：${why}`, `刪掉專案裡的 tools 資料夾，再雙擊 start.bat 重新安裝（需要網路）。${youtubeOnly}`)
 }
 
 /** Runs every check; results come back in display order. */
 export async function runChecks(ctx = createContext()) {
-  const [node, pnpm, ffmpegGroup, uv, fonts, data, smi, ollama, later] = await Promise.all([
+  const [node, pnpm, ffmpegGroup, uv, fonts, data, smi, ollama, ytdlp] = await Promise.all([
     checkNode(ctx),
     checkPnpm(ctx),
     checkFfmpeg(ctx),
@@ -422,14 +458,14 @@ export async function runChecks(ctx = createContext()) {
     checkDataDir(ctx),
     checkNvidiaSmi(ctx),
     checkOllama(ctx),
-    checkLaterTools(ctx),
+    checkYtdlp(ctx),
   ])
   const ffmpegOk = ffmpegGroup[0].status === 'ok'
   const [nvenc, transcriber] = await Promise.all([
     checkNvenc(ctx, ffmpegOk),
     checkTranscriber(ctx, uv.status === 'ok'),
   ])
-  return [node, pnpm, ...ffmpegGroup, nvenc, uv, transcriber, fonts, data, smi, ollama, ...later]
+  return [node, pnpm, ...ffmpegGroup, nvenc, uv, transcriber, fonts, data, smi, ollama, ytdlp]
 }
 
 /** Required items that failed. */

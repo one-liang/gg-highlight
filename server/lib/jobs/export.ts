@@ -10,6 +10,12 @@ import { createThrottledProgress } from './progress'
 import { type JobDeps, type JobDepsInput, type JobQueue, resolveDeps } from './types'
 import { abortKind, SerialWorker, throwIfAborted } from './worker'
 
+/**
+ * An Export of a YouTube video whose downloaded file is gone (MISSING_SOURCE_MESSAGE is about a local
+ * original); worded like the 422 of POST /api/highlights/:id/clips.
+ */
+const EXPORT_MISSING_DOWNLOAD_MESSAGE = '找不到下載的影片檔'
+
 export function clipFiles(deps: Pick<JobDeps, 'config'>, clip: Pick<ClipRecord, 'id' | 'videoId'>) {
   const dir = clipsDir(deps.config, clip.videoId)
   const names = { mp4: `${clip.id}.mp4`, srt: `${clip.id}.srt`, ass: `${clip.id}.ass` }
@@ -40,7 +46,9 @@ export async function runExport(deps: JobDeps, clipId: string, signal: AbortSign
     const video = repos.videos.get(clip.videoId)
     if (!video) throw new Error('找不到這支影片')
     const input = video.filePath
-    if (!input || !(await isFile(input))) throw new Error(MISSING_SOURCE_MESSAGE)
+    if (!input || !(await isFile(input))) {
+      throw new Error(video.sourceKind === 'youtube' ? EXPORT_MISSING_DOWNLOAD_MESSAGE : MISSING_SOURCE_MESSAGE)
+    }
     const media = video.media ?? await probeMedia(tools, input)
     throwIfAborted(signal)
 

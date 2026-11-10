@@ -3,8 +3,8 @@ import path from 'node:path'
 import { defineEventHandler } from 'h3'
 import type { MediaInfo, SourceVideo } from '../../../shared/types/domain'
 import {
-  addVideoSchema, badRequest, conflict, forbidden, notFound, parseWith, readJsonBody, titleFromFileName, unprocessable,
-  unreadableVideo,
+  addVideoSchema, addYoutubeVideo, badRequest, conflict, forbidden, notFound, parseWith, readJsonBody, titleFromFileName,
+  unprocessable, unreadableVideo,
 } from '../../lib/api'
 import { checkAudioTrack } from '../../lib/jobs'
 import { isInWatchFolders, resolveUpload, toSourceVideo } from '../../lib/library'
@@ -12,8 +12,18 @@ import { probeMedia } from '../../lib/media'
 import { useServices } from '../../lib/services'
 
 export default defineEventHandler(async (event): Promise<SourceVideo> => {
-  const { config, repos, tools, analysis } = useServices()
+  const { config, repos, tools, analysis, youtube, metadataCache } = useServices()
   const body = parseWith(addVideoSchema, await readJsonBody(event))
+
+  if (body.sourceKind === 'youtube') {
+    // No file yet: the first Analysis downloads it (design.md「YouTube」→「加入」).
+    const video = await addYoutubeVideo(
+      { repos, youtube, metadataCache, log: message => console.log(message) },
+      { youtubeUrl: body.youtubeUrl ?? '', language: body.language },
+    )
+    analysis.kick()
+    return toSourceVideo(video)
+  }
 
   let filePath: string
   let fileName: string
@@ -61,6 +71,7 @@ export default defineEventHandler(async (event): Promise<SourceVideo> => {
     sourceKind: body.sourceKind,
     filePath,
     youtubeUrl: null,
+    youtube: null,
     language: body.language,
     audioTrack: body.audioTrack,
     media,

@@ -1,7 +1,8 @@
 // Startup: listen address defaults, open the database, put interrupted work back in the queues,
-// start them, tidy old uploads.
+// tidy leftover YouTube downloads, start the queues, tidy old uploads. Never runs yt-dlp (start.mjs
+// installs and updates it before the server starts).
 import { applyListenDefaults } from '../lib/config'
-import { cleanupOrphanUploads } from '../lib/library'
+import { cleanupOrphanDownloads, cleanupOrphanUploads } from '../lib/library'
 import { resetServices, useServices } from '../lib/services'
 
 const ORPHAN_UPLOAD_AGE_MS = 24 * 60 * 60 * 1000
@@ -36,6 +37,17 @@ export default defineNitroPlugin((nitroApp) => {
     const clips = await services.exports.recover()
     if (analyses.length > 0) console.log(`[gg-highlight] 重新排隊 ${analyses.length} 個中斷的分析`)
     if (clips.length > 0) console.log(`[gg-highlight] 重新排隊 ${clips.length} 個中斷的輸出`)
+
+    // Before the Analysis queue starts: no download can be writing yet, so every <videoId>.* whose id
+    // is not in the Library is a leftover (e.g. of a removal that could not delete a file in use).
+    try {
+      const orphans = await cleanupOrphanDownloads(services.config, services.repos.videos.list().map(v => v.id))
+      if (orphans > 0) console.log(`[gg-highlight] 清掉 ${orphans} 個不屬於任何影片的下載檔`)
+    }
+    catch (err) {
+      console.warn(`[gg-highlight] 清理下載資料夾失敗：${(err as Error).message}`)
+    }
+
     services.analysis.start()
     services.exports.start()
 

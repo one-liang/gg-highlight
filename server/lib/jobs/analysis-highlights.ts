@@ -7,10 +7,12 @@ import { readTranscriptWithLlm } from '../llm'
 import type { TranscriptSignalResult } from '../llm'
 import { extractAudio } from '../media'
 import { coverageMask, loudnessTrack, momentsTrack, readLoudnessEnvelope, readSignalsFile, writeSignalsFile } from '../signals'
-import type { LoudnessEnvelope, NamedTrack } from '../signals'
-import { SIGNALS_STEP_SHARES } from './analysis-steps'
+import type { LoudnessEnvelope, NamedTrack, SignalsFile } from '../signals'
+import { SIGNALS_STEP_SHARES, YOUTUBE_HIGHLIGHTS_SIGNALS_STEP_SHARES } from './analysis-steps'
 import type { AnalysisRun } from './analysis-steps'
-import { MISSING_SOURCE_MESSAGE, readableError } from './errors'
+import { refreshYoutubeData, youtubeSignals } from './analysis-youtube'
+import type { YoutubeRunData, YoutubeSignals, YoutubeSource } from './analysis-youtube'
+import { MISSING_DOWNLOAD_MESSAGE, MISSING_SOURCE_MESSAGE, readableError } from './errors'
 import { isFile } from './files'
 import { throwIfAborted } from './worker'
 
@@ -20,11 +22,29 @@ export type LoudnessInput =
   | { kind: 'wav', path: string }
   | { kind: 'missing', reason: string }
 
+/** Where a YouTube video's chat / heatmap data comes from in the signals step. */
+export type YoutubeSignalsInput =
+  /** 'full': read by the download step. */
+  | { kind: 'downloaded', data: YoutubeRunData }
+  /** 'highlights': read again at the start of the signals step (never downloads the video file). */
+  | { kind: 'refresh', source: YoutubeSource }
+
 export interface SignalsOutcome {
   envelope: LoudnessEnvelope | null
   transcript: TranscriptSignalResult
-  /** Shown as「這次的候選依據」. */
+  /** Shown as「這次的候選依據」: loudness, transcript, and for YouTube videos chat and heatmap. */
   states: SignalState[]
+  /** YouTube videos: per-second chat density when the chat Signal is used. */
+  chat?: Float32Array | null
+  /** YouTube videos: per-second replay heatmap (with its coverage) when the heatmap Signal is used. */
+  heatmap?: YoutubeSignals['heatmap']
+}
+
+/** Progress shares inside the signals step (youtube: the 'highlights' refresh of a YouTube video, else 0). */
+interface SignalsShares {
+  youtube: number
+  loudness: number
+  transcript: number
 }
 
 function rethrowIfAborted(run: AnalysisRun, err: unknown): void {
@@ -44,8 +64,10 @@ export async function loudnessForHighlights(run: AnalysisRun, media: MediaInfo):
   }
   const filePath = run.filePath
   if (!filePath || !(await isFile(filePath))) {
-    run.log(`${MISSING_SOURCE_MESSAGE}，這次不用音量找精華`)
-    return { kind: 'missing', reason: MISSING_SOURCE_MESSAGE }
+    // 'highlights' never downloads a YouTube video's file again.
+    const reason = run.sourceKind === 'youtube' ? MISSING_DOWNLOAD_MESSAGE : MISSING_SOURCE_MESSAGE
+    run.log(`${reason}，這次不用音量找精華`)
+    return { kind: 'missing', reason }
   }
   try {
     await fs.mkdir(run.files.dir, { recursive: true })
@@ -67,13 +89,13 @@ function signalState(kind: SignalState['kind'], status: SignalState['status'], r
   return { kind, status, reason }
 }
 
-async function loudnessSignal(run: AnalysisRun, input: LoudnessInput): Promise<{ envelope: LoudnessEnvelope | null, state: SignalState }> {
+async function loudnessSignal(run: AnalysisRun, input: LoudnessInput, shares: SignalsShares): Promise<{ envelope: LoudnessEnvelope | null, state: SignalState }> {
   if (input.kind === 'cached') return { envelope: input.envelope, state: signalState('loudness', 'used') }
   if (input.kind === 'missing') return { envelope: null, state: signalState('loudness', 'missing', input.reason) }
   try {
     const envelope = await readLoudnessEnvelope(input.path, {
       signal: run.signal,
-      onProgress: fraction => run.progress.update(SIGNALS_STEP_SHARES.loudness * fraction),
+      onProgress: fraction => run.progress.update(shares.youtube + shares.loudness * fraction),
     })
     return { envelope, state: signalState('loudness', 'used') }
   }
@@ -86,26 +108,30 @@ async function loudnessSignal(run: AnalysisRun, input: LoudnessInput): Promise<{
 }
 
 /** The LLM reads the current Transcript text (with the user's edits). Rejects only on cancel / shutdown. */
-function transcriptSignal(run: AnalysisRun): Promise<TranscriptSignalResult> {
+function transcriptSignal(run: AnalysisRun, shares: SignalsShares): Promise<TranscriptSignalResult> {
   const { deps } = run
   const lines = deps.repos.transcript.list(run.videoId).map(({ start, end, text }) => ({ start, end, text }))
-  const base = SIGNALS_STEP_SHARES.loudness
+  const base = shares.youtube + shares.loudness
   return readTranscriptWithLlm(deps.config.ollama, lines, {
     signal: run.signal,
-    onProgress: fraction => run.progress.update(base + SIGNALS_STEP_SHARES.transcript * fraction),
+    onProgress: fraction => run.progress.update(base + shares.transcript * fraction),
     log: run.log,
     language: run.language,
     fetch: deps.fetch,
   })
 }
 
-/** signals.json is only a cache (loudness reuse in 'highlights' runs): a failed write is logged, not fatal. */
-async function saveSignals(run: AnalysisRun, envelope: LoudnessEnvelope | null, transcript: TranscriptSignalResult): Promise<void> {
+/**
+ * signals.json is only a cache (loudness reuse in 'highlights' runs, the last YouTube heatmap when it
+ * cannot be read again): a failed write is logged, not fatal.
+ */
+async function saveSignals(run: AnalysisRun, envelope: LoudnessEnvelope | null, transcript: TranscriptSignalResult, heatmap: SignalsFile['heatmap']): Promise<void> {
   try {
     await writeSignalsFile(run.files.signals, {
-      version: 1,
+      version: 2,
       loudness: envelope,
       transcript: transcript.state.status === 'used' ? { model: transcript.model, moments: transcript.moments } : null,
+      heatmap,
     })
   }
   catch (err) {
@@ -113,16 +139,37 @@ async function saveSignals(run: AnalysisRun, envelope: LoudnessEnvelope | null, 
   }
 }
 
-/** The signals step: loudness (10 %), then the LLM over the Transcript (90 %); writes signals.json. */
-export async function computeSignals(run: AnalysisRun, input: LoudnessInput): Promise<SignalsOutcome> {
+/**
+ * The signals step: loudness (10 %), for YouTube videos chat density and the replay heatmap, then the
+ * LLM over the Transcript (90 %); writes signals.json. A YouTube video's 'highlights' run first reads
+ * the metadata again (10 %, the LLM then 80 %). `durationSec`: length of the tracks (the probed length).
+ */
+export async function computeSignals(run: AnalysisRun, input: LoudnessInput, durationSec: number, youtube: YoutubeSignalsInput | null = null): Promise<SignalsOutcome> {
   run.progress.step('signals')
-  const loudness = await loudnessSignal(run, input)
+  const shares: SignalsShares = youtube?.kind === 'refresh' ? YOUTUBE_HIGHLIGHTS_SIGNALS_STEP_SHARES : { youtube: 0, ...SIGNALS_STEP_SHARES }
+  let data: YoutubeRunData | null = null
+  if (youtube?.kind === 'refresh') data = await refreshYoutubeData(run, youtube.source, fraction => run.progress.update(shares.youtube * fraction))
+  else if (youtube) data = youtube.data
   throwIfAborted(run.signal)
-  run.progress.update(SIGNALS_STEP_SHARES.loudness)
-  const transcript = await transcriptSignal(run)
+
+  const loudness = await loudnessSignal(run, input, shares)
   throwIfAborted(run.signal)
-  await saveSignals(run, loudness.envelope, transcript)
-  return { envelope: loudness.envelope, transcript, states: [loudness.state, transcript.state] }
+  run.progress.update(shares.youtube + shares.loudness)
+  let extra: YoutubeSignals | null = null
+  if (data) {
+    const previous = (await readSignalsFile(run.files.signals))?.heatmap ?? null
+    extra = await youtubeSignals(run, data, durationSec, previous)
+  }
+  const transcript = await transcriptSignal(run, shares)
+  throwIfAborted(run.signal)
+  await saveSignals(run, loudness.envelope, transcript, extra?.heatmapFile ?? null)
+  return {
+    envelope: loudness.envelope,
+    transcript,
+    states: [loudness.state, transcript.state, ...(extra?.states ?? [])],
+    chat: extra?.chat ?? null,
+    heatmap: extra?.heatmap ?? null,
+  }
 }
 
 /**
@@ -138,6 +185,9 @@ export function signalTracks(outcome: SignalsOutcome, durationSec: number): Name
     if (transcript.unread.length > 0) track.covered = coverageMask(transcript.unread, durationSec)
     tracks.push(track)
   }
+  if (outcome.chat) tracks.push({ kind: 'chat', values: outcome.chat })
+  // The heatmap has no value past its last bucket (covered 0): those seconds leave it out of the weighting.
+  if (outcome.heatmap) tracks.push({ kind: 'heatmap', values: outcome.heatmap.values, covered: outcome.heatmap.covered })
   return tracks
 }
 

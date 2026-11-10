@@ -164,8 +164,16 @@ export const videoEncoderLabels: Record<SystemInfo['videoEncoder'], string> = {
   libx264: 'CPU 編碼（較慢）',
 }
 
-export function analysisStepLabel(step: AnalysisStep | null | undefined): string {
-  return step ? analysisStepLabels[step] : ''
+/** The Signals a video's Analysis computes, as one phrase: YouTube videos add the chat and the heatmap. */
+export function signalNamesFor(sourceKind: SourceKind | null | undefined): string {
+  return sourceKind === 'youtube' ? '音量、逐字稿、聊天室與重播熱度' : '音量與逐字稿'
+}
+
+/** Step label; the signals step names the Signals of the video's source (analysisStepLabels has the local one). */
+export function analysisStepLabel(step: AnalysisStep | null | undefined, sourceKind?: SourceKind | null): string {
+  if (!step) return ''
+  if (step === 'signals') return `分析${signalNamesFor(sourceKind)}`
+  return analysisStepLabels[step]
 }
 
 /** "音軌 1：aac・2 聲道・Mic" (1-based for people; value stays 0-based). */
@@ -218,10 +226,20 @@ export function analysisStepState(step: AnalysisStep, current: AnalysisStep | nu
 /** Same text the server stores as the analysis error when the source file is gone. */
 export const MISSING_FILE_LABEL = '找不到原始影片檔'
 
+/** A YouTube video's downloaded file was deleted (a 'full' run downloads it again). */
+export const MISSING_DOWNLOAD_LABEL = '下載的影片檔不見了'
+
+/** What the missing-file line and alert say, by source. */
+export function missingFileLabel(video: Pick<SourceVideo, 'sourceKind'>): string {
+  return video.sourceKind === 'youtube' ? MISSING_DOWNLOAD_LABEL : MISSING_FILE_LABEL
+}
+
 /** Library row: the separate missing-file line, unless the failed analysis already says exactly that. */
 export function showsMissingFileLine(video: Pick<SourceVideo, 'fileMissing' | 'analysis'>): boolean {
   if (!video.fileMissing) return false
-  return !(video.analysis.status === 'failed' && video.analysis.error?.startsWith(MISSING_FILE_LABEL))
+  if (video.analysis.status !== 'failed') return true
+  const error = video.analysis.error ?? ''
+  return !(error.startsWith(MISSING_FILE_LABEL) || error.startsWith(MISSING_DOWNLOAD_LABEL))
 }
 
 export function isAnalysisActive(video: Pick<SourceVideo, 'analysis'>): boolean {

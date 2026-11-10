@@ -37,6 +37,9 @@
 //   Note: with the default 60 s duration the heatmap burst (20–26 s) starts inside the first 30 s, which
 //   the heatmap Signal caps at the median (design.md「重播熱度」step 2) → "沒有明顯起伏". Use a longer
 //   duration or --fake-heatmap-peak=36 for a heatmap the Signal uses.
+//   Chat: about 4 background messages per minute plus a burst of 40 reactions from 20 authors at 30–40 s
+//   of 60 s (scaled by duration ÷ 60); the chat Signal scores the seconds just before it (chat lags 5–25 s).
+//   The burst keeps 40 messages, so beyond about 10 minutes it is spread too thin to score.
 
 export type FakeYtdlpScenarioName =
   | 'vodChat'

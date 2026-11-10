@@ -2,6 +2,7 @@
 import { z } from 'zod'
 import type {
   AddVideoBody, CreateClipBody, CreateHighlightBody, ReanalyzeBody, Settings, UpdateHighlightBody, UpdateSegmentBody,
+  YoutubeProbeBody,
 } from '../../../shared/types/domain'
 import { badRequest } from './errors'
 
@@ -10,13 +11,30 @@ export const MAX_SEGMENT_TEXT_CHARS = 200
 
 const seconds = (label: string) => z.number({ error: `${label}必須是數字（秒）` })
 
+export const YOUTUBE_URL_REQUIRED_MESSAGE = '請貼上 YouTube 影片連結'
+export const YOUTUBE_AUDIO_TRACK_MESSAGE = 'YouTube 影片只有一條音軌，音軌必須是 0'
+
+/**
+ * POST /api/videos. YouTube needs youtubeUrl and audio track 0 (the download has one audio track);
+ * the link itself is parsed by the route (400 / 422 by kind).
+ */
 export const addVideoSchema = z.object({
-  sourceKind: z.enum(['watch-folder', 'upload'], { error: '來源必須是 watch-folder 或 upload' }),
+  sourceKind: z.enum(['watch-folder', 'upload', 'youtube'], { error: '來源必須是 watch-folder、upload 或 youtube' }),
   filePath: z.string({ error: '影片路徑必須是文字' }).optional(),
   uploadId: z.string({ error: '上傳編號必須是文字' }).optional(),
+  youtubeUrl: z.string({ error: 'YouTube 連結必須是文字' }).optional(),
   language: z.enum(['zh', 'en'], { error: '語言必須是 zh（中文）或 en（英文）' }),
   audioTrack: z.number({ error: '音軌必須是數字' }).int('音軌必須是整數').min(0, '音軌不能小於 0').max(255, '音軌編號太大').default(0),
-}, { error: NOT_OBJECT }) satisfies z.ZodType<AddVideoBody, unknown>
+}, { error: NOT_OBJECT }).superRefine((body, ctx) => {
+  if (body.sourceKind !== 'youtube') return
+  if (!body.youtubeUrl?.trim()) ctx.addIssue({ code: 'custom', path: ['youtubeUrl'], message: YOUTUBE_URL_REQUIRED_MESSAGE })
+  else if (body.audioTrack !== 0) ctx.addIssue({ code: 'custom', path: ['audioTrack'], message: YOUTUBE_AUDIO_TRACK_MESSAGE })
+}) satisfies z.ZodType<AddVideoBody, unknown>
+
+/** POST /api/youtube/probe; the link is parsed by the route (400 / 422 by kind). */
+export const youtubeProbeSchema = z.object({
+  url: z.string({ error: YOUTUBE_URL_REQUIRED_MESSAGE }).trim().min(1, YOUTUBE_URL_REQUIRED_MESSAGE),
+}, { error: NOT_OBJECT }) satisfies z.ZodType<YoutubeProbeBody, unknown>
 
 export const createHighlightSchema = z.object({
   start: seconds('起點'),

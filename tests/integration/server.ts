@@ -12,6 +12,7 @@ import { runCommand } from '../../scripts/lib/common.mjs'
 
 export const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 export const FAKE_TRANSCRIBER = path.join(ROOT_DIR, 'server', 'lib', 'jobs', 'test-helpers', 'fake-transcriber.mjs')
+export const FAKE_YTDLP = path.join(ROOT_DIR, 'server', 'lib', 'youtube', 'test-helpers', 'fake-yt-dlp.mjs')
 
 /** Test files run in parallel workers: only one of them builds, the others wait for it (a lock folder). */
 const BUILD_LOCK = path.join(ROOT_DIR, 'node_modules', '.gg-test-build-lock')
@@ -80,14 +81,21 @@ export interface RunningServer {
 
 /**
  * Runs the built server on a free port. `host: null` leaves HOST / NITRO_HOST unset, to see where the
- * server listens on its own. GG_OLLAMA_URL is 'off' unless `env` sets it (e.g. to a fake Ollama), so
- * a developer's real Ollama is never used.
+ * server listens on its own. GG_OLLAMA_URL is 'off' and GG_YTDLP_CMD the fake yt-dlp unless `env` sets
+ * them, so a developer's real Ollama or yt-dlp (and YouTube) is never used.
  */
 export async function startServer(env: Record<string, string>, opts: { host?: string | null } = {}): Promise<RunningServer> {
   const port = await freePort()
   let output = ''
   const host = opts.host === undefined ? '127.0.0.1' : opts.host
-  const childEnv: NodeJS.ProcessEnv = { ...process.env, GG_OLLAMA_URL: 'off', ...env, PORT: String(port), NODE_ENV: 'production' }
+  const childEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    GG_OLLAMA_URL: 'off',
+    GG_YTDLP_CMD: JSON.stringify([process.execPath, FAKE_YTDLP]),
+    ...env,
+    PORT: String(port),
+    NODE_ENV: 'production',
+  }
   delete childEnv.NITRO_HOST
   delete childEnv.NITRO_PORT
   if (host === null) delete childEnv.HOST

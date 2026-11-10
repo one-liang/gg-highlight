@@ -1,7 +1,11 @@
 // Turning job failures into messages a user can read (no stack traces, always Chinese context).
+import { UNKNOWN_ERROR_PREFIX } from '../youtube/errors'
+import { YtdlpError, type YtdlpErrorKind } from '../youtube/types'
 
 export { CANCELLED_MESSAGE } from '../../../shared/types/domain'
 export const MISSING_SOURCE_MESSAGE = '找不到原始影片檔'
+/** A YouTube video whose downloaded file was deleted (the UI's MISSING_DOWNLOAD_LABEL). */
+export const MISSING_DOWNLOAD_MESSAGE = '下載的影片檔不見了'
 const MAX_MESSAGE_CHARS = 1200
 const CJK_RE = /[㐀-鿿豈-﫿]/u
 
@@ -32,14 +36,34 @@ function messageOf(err: unknown): string {
   return ''
 }
 
+/** Live-status checks (design.md「YouTube」→「加入」): their text says it all, so it is shown without a step prefix. */
+const YTDLP_STATUS_KINDS: ReadonlySet<YtdlpErrorKind> = new Set(['live', 'post-live', 'not-video'])
+
+/**
+ * yt-dlp's reason in Chinese (the mapped table text, or `<raw ERROR line>` for an unknown one, without
+ * the generic 下載失敗： in front, since the caller names what failed).
+ */
+export function ytdlpReason(err: YtdlpError): string {
+  const message = err.message.startsWith(UNKNOWN_ERROR_PREFIX) ? err.message.slice(UNKNOWN_ERROR_PREFIX.length) : err.message
+  return message || err.detail || '原因不明'
+}
+
+function cut(text: string): string {
+  return text.length > MAX_MESSAGE_CHARS ? `${text.slice(0, MAX_MESSAGE_CHARS - 1)}…` : text
+}
+
 /**
  * A readable failure message: the error's own text without stack traces, prefixed with
- * `${context}失敗：` when it carries no Chinese explanation, and cut to a sane length.
+ * `${context}失敗：` when it carries no Chinese explanation, and cut to a sane length. A yt-dlp failure
+ * (YtdlpError, already in Chinese) always gets the prefix (下載影片失敗：YouTube 可能改版了…), except the
+ * live-status checks, whose text is shown as is.
  */
 export function readableError(err: unknown, context: string): string {
+  if (err instanceof YtdlpError) {
+    return cut(YTDLP_STATUS_KINDS.has(err.kind) ? err.message : `${context}失敗：${ytdlpReason(err)}`)
+  }
   let text = stripStackTrace(messageOf(err))
   if (!text) return `${context}失敗（原因不明）`
   if (!CJK_RE.test(text)) text = `${context}失敗：${text}`
-  if (text.length > MAX_MESSAGE_CHARS) text = `${text.slice(0, MAX_MESSAGE_CHARS - 1)}…`
-  return text
+  return cut(text)
 }

@@ -1,6 +1,6 @@
 // Steps of an Analysis per mode, their progress weights, labels and work files (design.md「分析」).
 import path from 'node:path'
-import type { AnalysisMode, AnalysisStep, Language } from '../../../shared/types/domain'
+import type { AnalysisMode, AnalysisStep, Language, SourceKind } from '../../../shared/types/domain'
 import { videoWorkDir } from '../config'
 import type { StepProgress } from './progress'
 import type { JobDeps } from './types'
@@ -24,8 +24,49 @@ export const ANALYSIS_STEPS: Readonly<Record<AnalysisMode, StepWeights>> = {
   ],
 }
 
+/**
+ * A YouTube video's 'full' run (design.md「YouTube」→「下載」): download first. Two tables, chosen at the
+ * start of the run: `download` when the video file has to be downloaded, `present` when the file from
+ * an earlier download is still on disk (the step then only reads the metadata and the chat replay).
+ */
+export const YOUTUBE_FULL_STEPS: Readonly<{ download: StepWeights, present: StepWeights }> = {
+  download: [
+    ['download', 0.2],
+    ['probe', 0.01],
+    ['extract-audio', 0.04],
+    ['transcribe', 0.48],
+    ['prepare-preview', 0.07],
+    ['signals', 0.18],
+    ['candidates', 0.02],
+  ],
+  present: [
+    ['download', 0.02],
+    ['probe', 0.02],
+    ['extract-audio', 0.05],
+    ['transcribe', 0.58],
+    ['prepare-preview', 0.1],
+    ['signals', 0.21],
+    ['candidates', 0.02],
+  ],
+}
+
+/** The step table of one run. `fileOnDisk`: the video's filePath is set and is a file (only matters for YouTube 'full'). */
+export function analysisSteps(mode: AnalysisMode, sourceKind: SourceKind, fileOnDisk: boolean): StepWeights {
+  if (mode === 'full' && sourceKind === 'youtube') return fileOnDisk ? YOUTUBE_FULL_STEPS.present : YOUTUBE_FULL_STEPS.download
+  return ANALYSIS_STEPS[mode]
+}
+
 /** Progress inside the signals step: loudness first, then the LLM reading the Transcript (by chunks read). */
 export const SIGNALS_STEP_SHARES = { loudness: 0.1, transcript: 0.9 } as const
+
+/**
+ * A YouTube video's 'highlights' run reads the metadata again (and maybe the chat replay) at the start
+ * of the signals step: YouTube data 10 %, loudness 10 %, the LLM 80 %.
+ */
+export const YOUTUBE_HIGHLIGHTS_SIGNALS_STEP_SHARES = { youtube: 0.1, loudness: 0.1, transcript: 0.8 } as const
+
+/** Progress inside the download step: metadata 3 %, video file 85 %, chat replay 12 %. */
+export const DOWNLOAD_STEP_SHARES = { metadata: 0.03, video: 0.85, chat: 0.12 } as const
 
 /** Context of failure messages ("<label>失敗：…"); the same names as the UI's step labels. */
 export const STEP_LABELS: Record<AnalysisStep, string> = {
@@ -58,7 +99,9 @@ export const LEFTOVER_PREFIXES = ['audio.', 'preview.tmp-', 'signals.tmp-']
 export interface AnalysisRun {
   deps: JobDeps
   videoId: string
+  sourceKind: SourceKind
   language: Language
+  /** The video file; the download step sets it once a YouTube download finishes. */
   filePath: string | null
   audioTrack: number
   files: AnalysisFiles

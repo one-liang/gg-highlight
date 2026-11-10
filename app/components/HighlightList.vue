@@ -10,6 +10,8 @@ const props = defineProps<{
   loaded: boolean
   error: string | null
   canPreview: boolean
+  /** Tooltip of 輸出 while the video file is missing (wording depends on the source). */
+  cannotExportText?: string
   focusedId: string | null
   clipCounts: Record<string, number>
   /** Signals of the last run that found candidates; null before any (milestone 1 videos). */
@@ -127,6 +129,7 @@ function startEdit(h: Highlight) {
         :edit-locked="!!editing && editing.id !== h.id"
         :focused="focusedId === h.id"
         :can-preview="canPreview"
+        :cannot-export-text="cannotExportText"
         :clip-count="clipCounts[h.id] ?? 0"
         @play="emit('play', $event, stopAtEnd)"
         @export="emit('export', $event)"

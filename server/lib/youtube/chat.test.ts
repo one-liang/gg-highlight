@@ -337,6 +337,17 @@ describe('chatDensity', () => {
     expect(nonzeroSeconds(density.values)).toEqual([])
   })
 
+  it('counts messages exactly at the end of the video (integer and fractional durations)', () => {
+    for (const duration of [600, 600.4]) {
+      const atEnd = burst(duration - 10, 10, 30, i => `v${i}`).concat({ offsetSec: duration, weight: 1, author: 'last' })
+      const density = chatDensity(atEnd, duration)
+      expect(density.counted).toBe(31)
+      expect(density.values.length).toBe(Math.ceil(duration))
+      // The end-of-video burst shows 5–25 s earlier.
+      expect(Math.max(...density.values.subarray(Math.floor(duration) - 25))).toBe(1)
+    }
+  })
+
   it('does not depend on the input order', () => {
     const messages = [...steady(3600, 4), ...burst(1000, 10, 40, i => `fan${i}`)]
     expect(chatDensity([...messages].reverse(), 3600)).toEqual(chatDensity(messages, 3600))

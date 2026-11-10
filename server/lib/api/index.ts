@@ -4,16 +4,22 @@ export { asHttpError, badRequest, conflict, forbidden, httpError, isHttpError, n
 export {
   addVideoSchema, createClipSchema, createHighlightSchema, MAX_SEGMENT_TEXT_CHARS, parseIndexParam, parseWith,
   probeSchema, reanalyzeSchema, requireParam, settingsSchema, updateHighlightSchema, updateSegmentSchema,
+  YOUTUBE_AUDIO_TRACK_MESSAGE, YOUTUBE_URL_REQUIRED_MESSAGE, youtubeProbeSchema,
 } from './validation'
 export {
   checkHighlightRange, clipDownloadName, clock, END_SLACK_SECONDS, fileNameClock, LAYOUT_LABELS, MIN_HIGHLIGHT_SECONDS,
-  normalizeWatchFolders, safeFileNamePart, titleFromFileName,
+  MISSING_FILE_MESSAGES, missingFileMessage, normalizeWatchFolders, safeFileNamePart, titleFromFileName,
 } from './rules'
 export { getClipOr404, getHighlightOr404, getVideoOr404, readJsonBody } from './lookup'
 export { allowedMethods, type MatchedRoute } from './fallback'
 export {
-  checkReanalyze, NOT_READY_MESSAGES, REANALYZE_BUSY_MESSAGE, REANALYZE_CLIPS_BUSY_MESSAGE, REANALYZE_MISSING_SOURCE_MESSAGE,
+  canTranscribe, checkReanalyze, NOT_READY_MESSAGES, REANALYZE_BUSY_MESSAGE, REANALYZE_CLIPS_BUSY_MESSAGE, REANALYZE_MISSING_SOURCE_MESSAGE,
   REANALYZE_NO_TRANSCRIPT_MESSAGE, requireTranscriptReady, transcriptReady,
 } from './analysis'
 export type { ReanalyzeContext } from './analysis'
 export { ollamaInfo, SYSTEM_OLLAMA_TIMEOUT_MS } from './system'
+export {
+  addYoutubeVideo, parseYoutubeLink, probeYoutube, readYoutubeMetadata, toYoutubeInfo, toYoutubeMeta,
+  YOUTUBE_DUPLICATE_MESSAGE, YOUTUBE_METADATA_FAILED_MESSAGE, youtubeHttpError,
+} from './youtube'
+export type { AddYoutubeVideoInput, YoutubeApiDeps, YoutubeLink } from './youtube'

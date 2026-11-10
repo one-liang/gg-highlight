@@ -1,6 +1,7 @@
 // Analysis, one video at a time. 'full': probe → extract-audio → transcribe → prepare-preview →
-// signals → candidates. 'highlights': extract-audio (skipped when the loudness is cached) → signals →
-// candidates, keeping the Transcript (and the user's edits) and the preview (design.md「分析」).
+// signals → candidates (a YouTube video starts with download). 'highlights': extract-audio (skipped
+// when the loudness is cached) → signals → candidates, keeping the Transcript (and the user's edits)
+// and the preview, never downloading (design.md「分析」「YouTube」).
 import fs from 'node:fs/promises'
 import type { AnalysisMode, AnalysisStep, MediaInfo } from '../../../shared/types/domain'
 import type { VideoRecord } from '../db'
@@ -9,16 +10,20 @@ import { detectVideoEncoder, encoderFallbackMessage, extractAudio, preparePrevie
 import { buildTranscriptSegments, cleanRawTranscript, formatCleanupReport } from '../subtitles'
 import { runTranscriber } from '../transcription'
 import { computeSignals, finishAnalysis, loudnessForHighlights, storeCandidates } from './analysis-highlights'
-import type { LoudnessInput } from './analysis-highlights'
-import { ANALYSIS_STEPS, analysisFiles, LEFTOVER_PREFIXES, STEP_LABELS } from './analysis-steps'
+import type { LoudnessInput, YoutubeSignalsInput } from './analysis-highlights'
+import { analysisFiles, analysisSteps, LEFTOVER_PREFIXES, STEP_LABELS } from './analysis-steps'
 import type { AnalysisRun } from './analysis-steps'
+import { runDownloadStep, youtubeSourceOf } from './analysis-youtube'
 import { CANCELLED_MESSAGE, MISSING_SOURCE_MESSAGE, readableError } from './errors'
 import { isFile, removeLeftovers, removeQuietly } from './files'
 import { createStepProgress } from './progress'
 import { type JobDeps, type JobDepsInput, type JobQueue, resolveDeps } from './types'
 import { abortKind, SerialWorker, throwIfAborted } from './worker'
 
-export { ANALYSIS_STEPS, analysisFiles, SIGNALS_STEP_SHARES } from './analysis-steps'
+export {
+  ANALYSIS_STEPS, analysisFiles, analysisSteps, DOWNLOAD_STEP_SHARES, SIGNALS_STEP_SHARES, YOUTUBE_FULL_STEPS,
+  YOUTUBE_HIGHLIGHTS_SIGNALS_STEP_SHARES,
+} from './analysis-steps'
 
 /** recover() waits at most this long for Ollama to unload a model left by an interrupted run. */
 const RECOVER_UNLOAD_TIMEOUT_MS = 3000
@@ -35,12 +40,14 @@ export function checkAudioTrack(media: MediaInfo, audioTrack: number): void {
 /**
  * 'full' mode up to the preview: probe, extract audio.wav, transcribe (the new Transcript replaces
  * the old one only once this succeeds), prepare the preview. audio.wav stays for the loudness.
+ * A YouTube video's download step ran before (run.filePath is the downloaded file).
  */
 async function runTranscriptSteps(run: AnalysisRun): Promise<{ media: MediaInfo, loudness: LoudnessInput }> {
   const { deps, videoId, files, signal, progress } = run
   const { repos, config, tools } = deps
   const onProgress = (fraction: number) => progress.update(fraction)
 
+  if (progress.current !== 'probe') progress.step('probe')
   const filePath = run.filePath
   if (!filePath || !(await isFile(filePath))) throw new Error(MISSING_SOURCE_MESSAGE)
   const media = await probeMedia(tools, filePath)
@@ -99,7 +106,12 @@ export async function runAnalysis(deps: JobDeps, videoId: string, signal: AbortS
   const video = repos.videos.get(videoId)
   if (!video || video.analysis.status !== 'queued') return
   const mode: AnalysisMode = video.analysis.mode
-  const steps = ANALYSIS_STEPS[mode]
+  const isYoutube = video.sourceKind === 'youtube'
+  // Decided once at the start: a YouTube 'full' run's weights depend on whether the file must be downloaded.
+  const fileOnDisk = !!video.filePath && await isFile(video.filePath)
+  // Cancelled (or shutting down) while still queued: cancel() already recorded it.
+  if (signal.aborted) return
+  const steps = analysisSteps(mode, video.sourceKind, fileOnDisk)
   const files = analysisFiles(deps, videoId)
 
   // A 'full' re-run keeps the old Transcript until the transcribe step has a new one.
@@ -113,6 +125,7 @@ export async function runAnalysis(deps: JobDeps, videoId: string, signal: AbortS
   const run: AnalysisRun = {
     deps,
     videoId,
+    sourceKind: video.sourceKind,
     language: video.language,
     filePath: video.filePath,
     audioTrack: video.audioTrack,
@@ -123,9 +136,19 @@ export async function runAnalysis(deps: JobDeps, videoId: string, signal: AbortS
   }
 
   try {
-    const { media, loudness } = mode === 'full' ? await runTranscriptSteps(run) : await prepareHighlightsRun(run, video)
+    let youtube: YoutubeSignalsInput | null = null
+    let prepared: { media: MediaInfo, loudness: LoudnessInput }
+    if (mode === 'full') {
+      if (isYoutube) youtube = { kind: 'downloaded', data: await runDownloadStep(run, youtubeSourceOf(video), fileOnDisk) }
+      prepared = await runTranscriptSteps(run)
+    }
+    else {
+      prepared = await prepareHighlightsRun(run, video)
+      if (isYoutube) youtube = { kind: 'refresh', source: youtubeSourceOf(video) }
+    }
+    const { media, loudness } = prepared
     throwIfAborted(signal)
-    const outcome = await computeSignals(run, loudness)
+    const outcome = await computeSignals(run, loudness, media.durationSec, youtube)
     storeCandidates(run, outcome, media.durationSec)
     finishAnalysis(run)
   }
@@ -216,7 +239,8 @@ export class AnalysisQueue implements JobQueue {
       if (video.id === this.runningVideoId) continue
       if (video.analysis.step === 'signals') llmInterrupted = true
       // Same mode again. The Transcript and preview stay: a 'full' run replaces them at its own
-      // steps, a 'highlights' run never touches them.
+      // steps, a 'highlights' run never touches them. data/downloads is left alone, so an
+      // interrupted YouTube download resumes from its .part files.
       repos.videos.updateAnalysis(video.id, { status: 'queued' })
       this.priority.push(video.id)
       ids.push(video.id)

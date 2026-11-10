@@ -1,6 +1,9 @@
 import { defineEventHandler, getRouterParam } from 'h3'
 import type { Clip } from '../../../../shared/types/domain'
-import { createClipSchema, getHighlightOr404, getVideoOr404, parseWith, readJsonBody, requireTranscriptReady, unprocessable } from '../../../lib/api'
+import {
+  createClipSchema, getHighlightOr404, getVideoOr404, missingFileMessage, parseWith, readJsonBody, requireTranscriptReady,
+  unprocessable,
+} from '../../../lib/api'
 import { toClip } from '../../../lib/db'
 import { isFile } from '../../../lib/jobs'
 import { useServices } from '../../../lib/services'
@@ -16,7 +19,7 @@ export default defineEventHandler(async (event): Promise<Clip> => {
   const highlight = getHighlightOr404(repos, highlightId)
   const video = getVideoOr404(repos, highlight.videoId)
   requireTranscriptReady(video, 'export')
-  if (!sourceExists) throw unprocessable('找不到原始影片檔，無法輸出剪輯')
+  if (!sourceExists) throw unprocessable(missingFileMessage(video, 'export'))
   const clip = repos.clips.insert({
     videoId: video.id,
     highlightId: highlight.id,

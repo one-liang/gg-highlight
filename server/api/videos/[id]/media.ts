@@ -1,5 +1,5 @@
 import { defineEventHandler, getRouterParam } from 'h3'
-import { getVideoOr404, httpError, notFound } from '../../../lib/api'
+import { getVideoOr404, httpError, missingFileMessage, notFound } from '../../../lib/api'
 import { serveFile } from '../../../lib/http'
 import { isFile } from '../../../lib/jobs'
 import { useServices } from '../../../lib/services'
@@ -15,7 +15,7 @@ export default defineEventHandler(async (event) => {
     return await serveFile(event, file)
   }
   catch (err) {
-    if ((err as { statusCode?: number }).statusCode === 404) throw notFound('找不到原始影片檔，可能已被移動或刪除')
+    if ((err as { statusCode?: number }).statusCode === 404) throw notFound(missingFileMessage(video, 'media'))
     throw err
   }
 })

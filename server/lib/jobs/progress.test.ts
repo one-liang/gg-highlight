@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { ANALYSIS_STEPS, SIGNALS_STEP_SHARES } from './analysis'
+import {
+  ANALYSIS_STEPS, analysisSteps, DOWNLOAD_STEP_SHARES, SIGNALS_STEP_SHARES, YOUTUBE_FULL_STEPS, YOUTUBE_HIGHLIGHTS_SIGNALS_STEP_SHARES,
+} from './analysis'
 import { createStepProgress, createThrottledProgress } from './progress'
 
 function clock(start = 0) {
@@ -37,13 +39,37 @@ describe('createThrottledProgress', () => {
   })
 })
 
+describe('YouTube step tables (design.md「下載」)', () => {
+  it('download 20/1/4/48/7/18/2 % when the file must be downloaded, 2/2/5/58/10/21/2 % when it is on disk', () => {
+    expect(YOUTUBE_FULL_STEPS.download).toEqual([
+      ['download', 0.2], ['probe', 0.01], ['extract-audio', 0.04], ['transcribe', 0.48], ['prepare-preview', 0.07], ['signals', 0.18], ['candidates', 0.02],
+    ])
+    expect(YOUTUBE_FULL_STEPS.present).toEqual([
+      ['download', 0.02], ['probe', 0.02], ['extract-audio', 0.05], ['transcribe', 0.58], ['prepare-preview', 0.1], ['signals', 0.21], ['candidates', 0.02],
+    ])
+    expect(DOWNLOAD_STEP_SHARES.metadata + DOWNLOAD_STEP_SHARES.video + DOWNLOAD_STEP_SHARES.chat).toBeCloseTo(1)
+    expect(DOWNLOAD_STEP_SHARES).toEqual({ metadata: 0.03, video: 0.85, chat: 0.12 })
+    expect(YOUTUBE_HIGHLIGHTS_SIGNALS_STEP_SHARES).toEqual({ youtube: 0.1, loudness: 0.1, transcript: 0.8 })
+  })
+
+  it('analysisSteps picks the table by mode, source kind and whether the file is on disk', () => {
+    expect(analysisSteps('full', 'youtube', false)).toBe(YOUTUBE_FULL_STEPS.download)
+    expect(analysisSteps('full', 'youtube', true)).toBe(YOUTUBE_FULL_STEPS.present)
+    // 'highlights' never downloads; local videos keep their tables whether or not the file exists.
+    expect(analysisSteps('highlights', 'youtube', false)).toBe(ANALYSIS_STEPS.highlights)
+    expect(analysisSteps('full', 'watch-folder', false)).toBe(ANALYSIS_STEPS.full)
+    expect(analysisSteps('full', 'upload', true)).toBe(ANALYSIS_STEPS.full)
+    expect(analysisSteps('highlights', 'upload', true)).toBe(ANALYSIS_STEPS.highlights)
+  })
+})
+
 describe('createStepProgress', () => {
   it('weights the full analysis steps 2/5/60/10/21/2 % and the highlights-only steps 10/85/5 %', () => {
     expect(ANALYSIS_STEPS.full).toEqual([
       ['probe', 0.02], ['extract-audio', 0.05], ['transcribe', 0.6], ['prepare-preview', 0.1], ['signals', 0.21], ['candidates', 0.02],
     ])
     expect(ANALYSIS_STEPS.highlights).toEqual([['extract-audio', 0.1], ['signals', 0.85], ['candidates', 0.05]])
-    for (const steps of Object.values(ANALYSIS_STEPS)) {
+    for (const steps of [...Object.values(ANALYSIS_STEPS), ...Object.values(YOUTUBE_FULL_STEPS)]) {
       expect(steps.reduce((sum, [, w]) => sum + w, 0)).toBeCloseTo(1)
     }
     expect(SIGNALS_STEP_SHARES.loudness + SIGNALS_STEP_SHARES.transcript).toBeCloseTo(1)

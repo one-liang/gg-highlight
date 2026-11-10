@@ -1,11 +1,23 @@
 // Business rules of the API: Highlight ranges, Watch Folder settings, titles and download names.
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import type { Layout } from '../../../shared/types/domain'
+import type { Layout, SourceKind } from '../../../shared/types/domain'
 import { pathKey } from '../library'
 import { badRequest, unprocessable } from './errors'
 
 export const MIN_HIGHLIGHT_SECONDS = 0.5
+
+/** Texts for a video whose file is gone: a local original, or a YouTube download (design.md「YouTube」→「其他」). */
+export const MISSING_FILE_MESSAGES = {
+  export: { local: '找不到原始影片檔，無法輸出剪輯', youtube: '找不到下載的影片檔，無法輸出剪輯' },
+  media: { local: '找不到原始影片檔，可能已被移動或刪除', youtube: '找不到下載的影片檔，可能已被刪除' },
+} as const
+
+/** The 422 of an Export (or the 404 of the media route) when the video's file is not on disk. */
+export function missingFileMessage(video: { sourceKind: SourceKind }, action: keyof typeof MISSING_FILE_MESSAGES): string {
+  return MISSING_FILE_MESSAGES[action][video.sourceKind === 'youtube' ? 'youtube' : 'local']
+}
+
 // Times from the UI come from a <video> element and text inputs; allow a millisecond of slack.
 const EPS = 0.001
 /**

@@ -5,7 +5,10 @@ import { isFile } from '../../../lib/jobs'
 import { toSourceVideo } from '../../../lib/library'
 import { useServices } from '../../../lib/services'
 
-/** Queues a failed Analysis again in the same mode; a 'full' one obeys the 重新分析 rules (design.md). */
+/**
+ * Queues a failed Analysis again in the same mode; a 'full' one obeys the 重新分析 rules (design.md),
+ * so a YouTube video is retried even when its downloaded file is gone.
+ */
 export default defineEventHandler(async (event): Promise<SourceVideo> => {
   const { repos, analysis } = useServices()
   const id = getVideoOr404(repos, getRouterParam(event, 'id')).id

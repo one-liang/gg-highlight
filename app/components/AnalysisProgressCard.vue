@@ -2,7 +2,7 @@
 import type { SourceVideo } from '~~/shared/types/domain'
 import { analysisProgressText } from '~/utils/analysis'
 import { progressPercent } from '~/utils/format'
-import { analysisStepLabels, analysisStepsFor, analysisStepState } from '~/utils/labels'
+import { analysisStepLabel, analysisStepsFor, analysisStepState } from '~/utils/labels'
 
 const props = defineProps<{ video: SourceVideo }>()
 
@@ -11,14 +11,14 @@ const queued = computed(() => analysis.value.status === 'queued')
 const percent = computed(() => progressPercent(analysis.value.progress))
 const steps = computed(() => analysisStepsFor(props.video).map(step => ({
   step,
-  label: analysisStepLabels[step],
+  label: analysisStepLabel(step, props.video.sourceKind),
   state: analysisStepState(step, analysis.value.step, analysis.value.status),
 })))
 const text = computed(() => analysisProgressText(props.video))
 </script>
 
 <template>
-  <section class="rounded-lg border border-default p-5 sm:p-6" aria-live="polite">
+  <section class="rounded-lg border border-default p-5 sm:p-6" aria-live="polite" data-testid="analysis-progress">
     <div class="flex items-start gap-4">
       <span class="flex size-10 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
         <UIcon v-if="queued" name="i-lucide-hourglass" class="size-5" />

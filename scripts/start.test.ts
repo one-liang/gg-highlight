@@ -343,7 +343,8 @@ function launch(root: string, env: Record<string, string>): Launch {
     process.exit(code)
   `
   const child = spawn(process.execPath, ['--input-type=module', '-e', wrapper], {
-    env: { ...process.env, ...env },
+    // GG_YTDLP_CMD set: start.mjs must not run the real uv (network) unless a test fakes it.
+    env: { ...process.env, GG_YTDLP_CMD: 'node fake-yt-dlp.mjs', ...env },
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -445,6 +446,51 @@ describe.skipIf(process.platform === 'win32')('main (fake project)', () => {
     const run = launch(tmp, { PORT: String(await freePort()), GG_TEST_EXIT: '3', GG_TEST_MARKER: path.join(tmp, 'm') })
     expect(await run.exit).toBe(3)
     expect(run.output()).toMatch(/伺服器意外結束（代碼 3）/)
+  })
+
+  it('installs yt-dlp into tools/ before the server starts, checks once a day, and only warns on failure', async () => {
+    await fakeRoot(true)
+    const dir = path.join(tmp, '.uv')
+    const log = path.join(dir, 'calls.txt')
+    await write('.uv/uv', [
+      '#!/bin/sh',
+      `printf '%s|%s|%s\\n' "$*" "$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR" >> ${JSON.stringify(log)}`,
+      'if [ -n "$GG_TEST_UV_FAIL" ]; then echo "error: Failed to fetch" >&2; exit 2; fi',
+      'if [ "$2" = install ]; then mkdir -p "$UV_TOOL_BIN_DIR"; printf \'#!/bin/sh\\n\' > "$UV_TOOL_BIN_DIR/yt-dlp"; echo " + yt-dlp==2026.10.26" >&2; fi',
+      'if [ "$2" = upgrade ]; then echo "Nothing to upgrade" >&2; fi',
+      '',
+    ].join('\n'))
+    await fs.chmod(path.join(dir, 'uv'), 0o755)
+    const calls = async () => (await fs.readFile(log, 'utf8').catch(() => '')).split('\n').filter(Boolean)
+    const env = { PATH: `${dir}${path.delimiter}${process.env.PATH ?? ''}`, GG_YTDLP_CMD: '', PORT: String(await freePort()), GG_TEST_MARKER: path.join(tmp, 'm') }
+    const toolsEnv = `${path.join(tmp, 'tools', 'uv')}|${path.join(tmp, 'tools', 'bin')}`
+
+    const first = launch(tmp, env)
+    await first.waitFor(/gg-highlight 已啟動/)
+    const out = first.output()
+    expect(out).toMatch(/✅ 已安裝 yt-dlp 2026\.10\.26/)
+    expect(out.indexOf('已安裝 yt-dlp')).toBeLessThan(out.indexOf('啟動伺服器'))
+    first.child.kill('SIGTERM')
+    expect(await first.exit).toBe(0)
+    expect(await calls()).toEqual([`tool install --upgrade yt-dlp[default,deno]|${toolsEnv}`])
+    expect(existsSync(path.join(tmp, 'tools', '.yt-dlp-checked'))).toBe(true)
+
+    // checked less than a day ago: uv is not run, nothing is printed
+    const second = launch(tmp, env)
+    await second.waitFor(/gg-highlight 已啟動/)
+    expect(second.output()).not.toMatch(/yt-dlp/)
+    second.child.kill('SIGTERM')
+    expect(await second.exit).toBe(0)
+    expect(await calls()).toHaveLength(1)
+
+    // the server asked for a check (deleted the stamp) and PyPI cannot be reached: warn and start anyway
+    await fs.rm(path.join(tmp, 'tools', '.yt-dlp-checked'))
+    const third = launch(tmp, { ...env, GG_TEST_UV_FAIL: '1' })
+    await third.waitFor(/gg-highlight 已啟動/)
+    expect(third.output()).toMatch(/⚠️ 無法更新 yt-dlp（只影響 YouTube）：uv 執行失敗：Failed to fetch/)
+    third.child.kill('SIGTERM')
+    expect(await third.exit).toBe(0)
+    expect((await calls()).at(-1)).toBe(`tool upgrade yt-dlp|${toolsEnv}`)
   })
 
   it('rejects a bad PORT', async () => {

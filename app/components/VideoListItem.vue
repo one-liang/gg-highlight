@@ -1,14 +1,17 @@
 <script setup lang="ts">
 import type { SourceVideo } from '~~/shared/types/domain'
-import { analysisStepLabel, languageLabels, MISSING_FILE_LABEL, showsMissingFileLine } from '~/utils/labels'
+import { analysisStepLabel, languageLabels, missingFileLabel, showsMissingFileLine } from '~/utils/labels'
 import { formatDateTime, formatPercent, formatResolution, progressPercent } from '~/utils/format'
 import { formatDuration } from '~/utils/time'
+import { videoDurationSec, youtubeWatchUrl } from '~/utils/youtube'
 
 const props = defineProps<{ video: SourceVideo }>()
 const emit = defineEmits<{ delete: [video: SourceVideo] }>()
 
 const analysis = computed(() => props.video.analysis)
 const to = computed(() => `/videos/${encodeURIComponent(props.video.id)}`)
+const duration = computed(() => videoDurationSec(props.video))
+const watchUrl = computed(() => youtubeWatchUrl(props.video))
 </script>
 
 <template>
@@ -32,17 +35,20 @@ const to = computed(() => `/videos/${encodeURIComponent(props.video.id)}`)
       </div>
 
       <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-sm text-muted">
-        <span v-if="video.media" class="inline-flex items-center gap-1 tabular-nums">
-          <UIcon name="i-lucide-clock" class="size-3.5" />{{ formatDuration(video.media.durationSec) }}
+        <span v-if="duration !== null" class="inline-flex items-center gap-1 tabular-nums">
+          <UIcon name="i-lucide-clock" class="size-3.5" />{{ formatDuration(duration) }}
         </span>
         <span v-if="video.media" class="tabular-nums">{{ formatResolution(video.media.width, video.media.height) }}</span>
+        <span v-if="video.youtube?.channel" class="inline-flex min-w-0 items-center gap-1">
+          <UIcon name="i-lucide-tv" class="size-3.5 shrink-0" /><span class="truncate">{{ video.youtube.channel }}</span>
+        </span>
         <span>{{ languageLabels[video.language] }}</span>
         <span class="tabular-nums">加入於 {{ formatDateTime(video.createdAt) }}</span>
       </div>
 
       <div v-if="analysis.status === 'running'" class="mt-2 max-w-md">
         <div class="mb-1 flex items-center justify-between text-xs">
-          <span class="text-toned">{{ analysisStepLabel(analysis.step) || '分析中' }}</span>
+          <span class="text-toned">{{ analysisStepLabel(analysis.step, video.sourceKind) || '分析中' }}</span>
           <span class="tabular-nums text-muted">{{ formatPercent(analysis.progress) }}</span>
         </div>
         <UProgress :model-value="progressPercent(analysis.progress)" size="xs" />
@@ -56,12 +62,25 @@ const to = computed(() => `/videos/${encodeURIComponent(props.video.id)}`)
 
       <p v-if="showsMissingFileLine(video)" class="mt-1.5 flex items-center gap-1 text-sm text-warning">
         <UIcon name="i-lucide-triangle-alert" class="size-4 shrink-0" />
-        {{ MISSING_FILE_LABEL }}
+        {{ missingFileLabel(video) }}
       </p>
     </div>
 
     <div class="relative z-10 flex shrink-0 items-center gap-1 sm:gap-2">
       <AnalysisStatusBadge :analysis="analysis" />
+      <UTooltip v-if="watchUrl" text="在 YouTube 開啟">
+        <UButton
+          :to="watchUrl"
+          target="_blank"
+          rel="noopener noreferrer"
+          external
+          icon="i-lucide-external-link"
+          color="neutral"
+          variant="ghost"
+          size="sm"
+          aria-label="在 YouTube 開啟"
+        />
+      </UTooltip>
       <UTooltip text="從影片庫移除">
         <UButton
           icon="i-lucide-trash-2"

@@ -8,7 +8,7 @@ import type { AppConfig } from '../config'
 import { loadConfig } from '../config'
 import { createMetadataCache } from './cache'
 import { chatFilePath, chatPartPath } from './command'
-import { downloadChat, downloadVideo, lastChatOffsetMs } from './download'
+import { chatDownloadFailureReason, downloadChat, downloadVideo, lastChatOffsetMs } from './download'
 import { fetchMetadata } from './info'
 import { FAKE_YTDLP_ERRORS, FAKE_YTDLP_IDS, fakeYtdlpCommand, readArgsLogs } from './test-helpers/fake-yt-dlp.mjs'
 import { createYoutubeTools, ytdlpConfigFrom } from './tools'
@@ -36,7 +36,8 @@ function makeConfig(extra: Parameters<typeof fakeYtdlpCommand>[0] = {}): YtdlpCo
 /** A tiny script standing in for yt-dlp (receives yt-dlp's argv). */
 function script(name: string, body: string): string[] {
   const file = path.join(dir, name)
-  fs.writeFileSync(file, `const argv = process.argv.slice(2)\nconst arg = f => argv[argv.indexOf(f) + 1]\n${body}\n`)
+  // The trailing semicolon keeps a body that starts with `(` from continuing the arrow function.
+  fs.writeFileSync(file, `const argv = process.argv.slice(2)\nconst arg = f => argv[argv.indexOf(f) + 1];\n${body}\n`)
   return [process.execPath, file]
 }
 
@@ -137,7 +138,10 @@ describe('fetchMetadata', () => {
 
   it('times out (default 90 s; here shorter) and kills yt-dlp', async () => {
     const pidFile = path.join(dir, 'hang.pid')
-    const command = script('hang.mjs', `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setTimeout(() => {}, 60000)`.replace('require(\'node:fs\')', '(await import(\'node:fs\'))'))
+    const command = script('hang.mjs', `
+      const fs = await import('node:fs')
+      fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))
+      setTimeout(() => {}, 60000)`)
     const started = Date.now()
     const error = await caught(fetchMetadata({ ...config, command }, watch(IDS.vodChat), { timeoutMs: 500 }))
     expect(error).toBeInstanceOf(YtdlpError)
@@ -241,7 +245,9 @@ describe('downloadVideo', () => {
     const e2 = await caught(downloadVideo({ ...config, command: elsewhere }, { url: watch(IDS.vodChat), videoId: 'video-6' }))
     expect((e2 as YtdlpError).message).toContain('不在下載資料夾裡')
 
-    const ghost = script('ghost.mjs', `console.log('GGFILE ' + JSON.stringify(require('node:path').join(arg('-P'), 'ghost.mp4')))`.replace('require(\'node:path\')', '(await import(\'node:path\'))'))
+    const ghost = script('ghost.mjs', `
+      const path = await import('node:path')
+      console.log('GGFILE ' + JSON.stringify(path.join(arg('-P'), 'ghost.mp4')))`)
     const e3 = await caught(downloadVideo({ ...config, command: ghost }, { url: watch(IDS.vodChat), videoId: 'video-7' }))
     expect((e3 as YtdlpError).message).toContain('不存在')
   })
@@ -315,6 +321,7 @@ describe('downloadChat', () => {
     expect(error).toBeInstanceOf(YtdlpError)
     expect((error as YtdlpError).kind).toBe('blocked')
     expect((error as YtdlpError).detail).toBe(FAKE_YTDLP_ERRORS.chat429)
+    expect(chatDownloadFailureReason(error)).toBe(`聊天室重播下載失敗：${(error as YtdlpError).message}`)
     expect(fs.statSync(chatPartPath(config.downloadsDir, 'video-3')).size).toBe(0)
     expect(fs.existsSync(chatFilePath(config.downloadsDir, 'video-3'))).toBe(false)
     expect(fs.existsSync(stamp)).toBe(true)
@@ -324,6 +331,18 @@ describe('downloadChat', () => {
     const error = await caught(downloadChat(config, { url: watch(IDS.noChat), videoId: 'video-4', durationSec: 60 }))
     expect((error as YtdlpError).kind).toBe('unknown')
     expect((error as YtdlpError).message).toBe('聊天室重播下載失敗：yt-dlp 沒有寫出聊天室檔案（結束碼 0）')
+    expect(chatDownloadFailureReason(error)).toBe('聊天室重播下載失敗：yt-dlp 沒有寫出聊天室檔案（結束碼 0）')
+    // An unknown run deletes the update stamp, like any unknown yt-dlp failure.
+    expect(fs.existsSync(stamp)).toBe(false)
+  })
+
+  it('an unknown ERROR line → unknown 聊天室重播下載失敗：<ERROR line>', async () => {
+    const command = script('chat-odd.mjs', `console.error('ERROR: something new'); process.exit(1)`)
+    const error = await caught(downloadChat({ ...config, command }, { url: watch(IDS.vodChat), videoId: 'video-8', durationSec: 60 }))
+    expect((error as YtdlpError).kind).toBe('unknown')
+    expect((error as YtdlpError).message).toBe('聊天室重播下載失敗：ERROR: something new')
+    expect((error as YtdlpError).detail).toBe('ERROR: something new')
+    expect(chatDownloadFailureReason(error)).toBe('聊天室重播下載失敗：ERROR: something new')
   })
 
   it('success is the final file, whatever the exit code', async () => {

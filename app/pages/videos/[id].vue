@@ -4,16 +4,19 @@ import {
   analysisDoneNotice,
   analysisFailedTitle,
   canReanalyze,
+  canRunFull,
   countCandidates,
   failedRunFootnote,
+  highlightsUpgradeDescription,
   isFailedRerun,
   isTranscriptReady,
-  missingFileNextStep,
+  missingFileText,
   needsHighlightsUpgrade,
 } from '~/utils/analysis'
 import { formatFps, formatResolution } from '~/utils/format'
 import { isAnalysisActive, languageLabels } from '~/utils/labels'
 import { formatDuration } from '~/utils/time'
+import { videoDurationSec, youtubeWatchUrl } from '~/utils/youtube'
 
 const route = useRoute()
 const notify = useNotify()
@@ -57,6 +60,9 @@ watch(() => video.value?.analysis.status, async (now, before) => {
 useHead({ title: () => video.value?.title ?? '影片' })
 
 const transcriptReady = computed(() => !!video.value && isTranscriptReady(video.value))
+const duration = computed(() => (video.value ? videoDurationSec(video.value) : null))
+const watchUrl = computed(() => (video.value ? youtubeWatchUrl(video.value) : null))
+const missing = computed(() => (video.value ? missingFileText(video.value) : null))
 
 const retrying = ref(false)
 async function retry() {
@@ -139,12 +145,26 @@ function onDeleted() {
           <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-sm text-muted">
             <AnalysisStatusBadge :analysis="video.analysis" />
             <SourceKindBadge :kind="video.sourceKind" />
-            <span v-if="video.media" class="tabular-nums">{{ formatDuration(video.media.durationSec) }}</span>
+            <span v-if="duration !== null" class="tabular-nums">{{ formatDuration(duration) }}</span>
             <span v-if="video.media" class="tabular-nums">
               {{ formatResolution(video.media.width, video.media.height) }}<template v-if="formatFps(video.media.fps)">・{{ formatFps(video.media.fps) }}</template>
             </span>
             <span>{{ languageLabels[video.language] }}</span>
             <span v-if="video.media && video.media.audioTracks.length > 1">分析用音軌 {{ video.audioTrack + 1 }}</span>
+            <span v-if="video.youtube?.channel" class="inline-flex min-w-0 items-center gap-1" data-testid="youtube-channel">
+              <UIcon name="i-lucide-tv" class="size-3.5 shrink-0" /><span class="break-all">{{ video.youtube.channel }}</span>
+            </span>
+            <ULink
+              v-if="watchUrl"
+              :to="watchUrl"
+              target="_blank"
+              rel="noopener noreferrer"
+              external
+              class="inline-flex items-center gap-1 text-primary hover:underline"
+              data-testid="youtube-link"
+            >
+              <UIcon name="i-lucide-external-link" class="size-3.5 shrink-0" />在 YouTube 開啟
+            </ULink>
           </div>
         </div>
         <div class="flex shrink-0 items-center gap-2">
@@ -171,26 +191,21 @@ function onDeleted() {
       />
 
       <UAlert
-        v-if="video.fileMissing"
+        v-if="video.fileMissing && missing"
         color="warning"
         variant="subtle"
         icon="i-lucide-file-warning"
-        title="找不到原始影片檔"
+        :title="missing.title"
         class="mb-5"
         data-testid="file-missing"
       >
         <template #description>
-          <p v-if="transcriptReady">
-            原本的檔案可能被移動、改名或刪除，因此無法預覽，也無法輸出剪輯。逐字稿與精華片段仍然可以查看與修改。
-          </p>
-          <p v-else>
-            原本的檔案可能被移動、改名或刪除，因此無法分析、預覽或輸出剪輯。
-          </p>
-          <p v-if="video.filePath" class="mt-1">
+          <p>{{ missing.description }}</p>
+          <p v-if="missing.showPath && video.filePath" class="mt-1">
             原本的位置：<code class="break-all font-mono text-xs">{{ video.filePath }}</code>
           </p>
           <p class="mt-1">
-            {{ missingFileNextStep(video) }}
+            {{ missing.nextStep }}
           </p>
         </template>
       </UAlert>
@@ -201,11 +216,11 @@ function onDeleted() {
         variant="subtle"
         icon="i-lucide-sparkles"
         title="這支影片分析時還沒有自動找精華"
-        description="現在可以依音量與逐字稿（本機 AI）自動找出候選精華片段。「找精華片段」會保留逐字稿與你的修改；「重新分析全部」會重新辨識語音，順便套用新版的逐字稿清理。"
+        :description="highlightsUpgradeDescription(video)"
         class="mb-5"
         :actions="[
           { label: '找精華片段', icon: 'i-lucide-sparkles', color: 'primary', loading: reanalyzing === 'highlights', disabled: !!reanalyzing, onClick: findHighlights },
-          { label: '重新分析全部', icon: 'i-lucide-refresh-cw', color: 'neutral', variant: 'outline', disabled: !!reanalyzing || video.fileMissing, onClick: () => openReanalyze('full') },
+          { label: '重新分析全部', icon: 'i-lucide-refresh-cw', color: 'neutral', variant: 'outline', disabled: !!reanalyzing || !canRunFull(video), onClick: () => openReanalyze('full') },
         ]"
       />
 

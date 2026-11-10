@@ -15,6 +15,8 @@ const props = defineProps<{
   editLocked: boolean
   focused: boolean
   canPreview: boolean
+  /** Tooltip of 輸出 while the video file is missing. */
+  cannotExportText?: string
   clipCount: number
 }>()
 
@@ -187,7 +189,7 @@ async function saveRange() {
           :disabled="!!editing || editLocked"
           @click="emit('edit-start', h)"
         />
-        <UTooltip :text="canPreview ? '用這段輸出一支剪輯' : '找不到原始影片檔，無法輸出'">
+        <UTooltip :text="canPreview ? '用這段輸出一支剪輯' : (cannotExportText || '找不到原始影片檔，無法輸出')">
           <UButton
             label="輸出"
             icon="i-lucide-scissors"

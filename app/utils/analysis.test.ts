@@ -5,15 +5,25 @@ import {
   analysisFailedTitle,
   analysisProgressText,
   canReanalyze,
+  canRunFull,
+  cannotExportText,
+  cannotPreviewText,
   countCandidates,
   countEditedSegments,
   defaultReanalyzeMode,
+  DOWNLOAD_HINT,
   failedRunFootnote,
+  FULL_NEEDS_SOURCE_MESSAGE,
+  FULL_REDOWNLOAD_MESSAGE,
+  highlightsUpgradeDescription,
   isFailedRerun,
   isTranscriptReady,
   missingFileNextStep,
+  missingFileText,
   needsHighlightsUpgrade,
+  REDOWNLOAD_NEXT_STEP,
   REFILL_TRANSCRIPT_HINT,
+  reanalyzeOptions,
   reanalyzeStartedNotice,
   summarizeSignals,
   transcriptSignalFixable,
@@ -99,6 +109,38 @@ describe('re-analysis', () => {
     expect(defaultReanalyzeMode({ ...fine, fileMissing: true }, 0)).toBe('highlights')
   })
 
+  it('still preselects highlights for a YouTube video whose download is gone (full would download again)', () => {
+    const youtubeMissing = { ...fine, sourceKind: 'youtube' as const, fileMissing: true }
+    const youtubeThere = { ...fine, sourceKind: 'youtube' as const, fileMissing: false }
+    expect(defaultReanalyzeMode(youtubeMissing, 0)).toBe('highlights')
+    expect(defaultReanalyzeMode(youtubeThere, 0)).toBe('full')
+  })
+
+  it('lets a YouTube video run full without its file (the download step downloads it again)', () => {
+    expect(canRunFull({ sourceKind: 'upload', fileMissing: false })).toBe(true)
+    expect(canRunFull({ sourceKind: 'watch-folder', fileMissing: true })).toBe(false)
+    expect(canRunFull({ fileMissing: true })).toBe(false)
+    expect(canRunFull({ sourceKind: 'youtube', fileMissing: true })).toBe(true)
+    expect(canRunFull({ sourceKind: 'youtube', fileMissing: false })).toBe(true)
+  })
+
+  it('offers both re-analysis modes, disabling full only for a missing local file', () => {
+    const [highlights, full] = reanalyzeOptions({ sourceKind: 'upload', fileMissing: false })
+    expect(highlights).toMatchObject({ value: 'highlights', title: '只重新找精華片段', disabled: false, note: null })
+    expect(highlights!.description).toContain('只重新計算音量與逐字稿訊號')
+    expect(full).toMatchObject({ value: 'full', title: '重新辨識語音並找精華', disabled: false, note: null })
+
+    const local = reanalyzeOptions({ sourceKind: 'watch-folder', fileMissing: true })[1]!
+    expect(local).toMatchObject({ disabled: true, note: { text: FULL_NEEDS_SOURCE_MESSAGE, tone: 'warning' } })
+    expect(FULL_NEEDS_SOURCE_MESSAGE).toBe('找不到原始影片檔，無法重新辨識語音')
+
+    const youtube = reanalyzeOptions({ sourceKind: 'youtube', fileMissing: true })
+    expect(youtube[0]!.description).toContain('只重新計算音量、逐字稿、聊天室與重播熱度訊號')
+    expect(youtube[1]).toMatchObject({ disabled: false, note: { text: FULL_REDOWNLOAD_MESSAGE, tone: 'info' } })
+    expect(FULL_REDOWNLOAD_MESSAGE).toBe('會重新從 YouTube 下載影片')
+    expect(reanalyzeOptions({ sourceKind: 'youtube', fileMissing: false })[1]).toMatchObject({ disabled: false, note: null })
+  })
+
   it('preselects highlights when the AI Signal was missing for a fixable reason (re-transcribing does not help)', () => {
     expect(defaultReanalyzeMode(withTranscript('missing', '連不到 Ollama（http://127.0.0.1:11434），請確認 Ollama 已啟動'), 0)).toBe('highlights')
     expect(defaultReanalyzeMode(withTranscript('missing', 'Ollama 裡還沒有 qwen3.5:9b 模型，請執行 ollama pull qwen3.5:9b'), 0)).toBe('highlights')
@@ -119,6 +161,13 @@ describe('re-analysis', () => {
     expect(needsHighlightsUpgrade(v({ version: ANALYSIS_VERSION + 1 }))).toBe(false)
     expect(needsHighlightsUpgrade(v({ status: 'failed', version: 1, mode: 'highlights' }))).toBe(false)
     expect(needsHighlightsUpgrade(v({ status: 'running', version: 1, mode: 'highlights' }))).toBe(false)
+  })
+
+  it('names the video\'s Signals on the old-video banner', () => {
+    expect(highlightsUpgradeDescription({ sourceKind: 'upload' })).toContain('現在可以依音量與逐字稿（本機 AI）自動找出候選精華片段')
+    expect(highlightsUpgradeDescription({})).toContain('依音量與逐字稿（本機 AI）')
+    expect(highlightsUpgradeDescription({ sourceKind: 'youtube' })).toContain('現在可以依音量、逐字稿（本機 AI）、聊天室與重播熱度自動找出候選精華片段')
+    expect(highlightsUpgradeDescription({ sourceKind: 'youtube' })).toContain('「重新分析全部」會重新辨識語音')
   })
 
   it('confirms which run was queued', () => {
@@ -228,6 +277,52 @@ describe('completion notice', () => {
     }
   })
 
+  it('says a YouTube video\'s missing download can be fetched again', () => {
+    const yt = (partial: Partial<AnalysisState>, fileMissing = true) => ({ ...v(partial), sourceKind: 'youtube' as const, fileMissing })
+    expect(failedRunFootnote(yt({ status: 'failed', mode: 'highlights' }))).toEqual(['逐字稿與精華片段不受影響，可以照常查看與修改。'])
+    const lines = failedRunFootnote(yt({ status: 'failed', mode: 'full', version: ANALYSIS_VERSION }))
+    expect(lines[0]).toBe('逐字稿與精華片段照常可以看、改；重新下載影片檔之前無法預覽或輸出剪輯。')
+    expect(lines[1]).toContain('「重試」會重新從 YouTube 下載影片、再重新辨識語音一次，之後改過的逐字稿會被覆蓋')
+    for (const line of lines) expect(line).not.toContain('放回原位置')
+    // with the file there, the same texts as a local video
+    expect(failedRunFootnote(yt({ status: 'failed', mode: 'full', version: ANALYSIS_VERSION }, false)))
+      .toEqual(failedRunFootnote({ ...v({ status: 'failed', mode: 'full', version: ANALYSIS_VERSION }), fileMissing: false }))
+  })
+
+  it('tells how to download a YouTube video again', () => {
+    const yt = (partial: Partial<AnalysisState>) => ({ ...v(partial), sourceKind: 'youtube' as const })
+    expect(REDOWNLOAD_NEXT_STEP).toBe('按「重新分析」→「重新辨識語音並找精華」會重新從 YouTube 下載（逐字稿的修改會被覆蓋）。')
+    expect(missingFileNextStep(yt({ status: 'done' }))).toBe(REDOWNLOAD_NEXT_STEP)
+    expect(missingFileNextStep(yt({ status: 'failed', mode: 'full', version: ANALYSIS_VERSION }))).toBe(REDOWNLOAD_NEXT_STEP)
+    expect(missingFileNextStep(yt({ status: 'running', mode: 'highlights' }))).toBe(REDOWNLOAD_NEXT_STEP)
+    expect(missingFileNextStep(yt({ status: 'failed', mode: 'full', version: null }))).toBe('按下方的「重試」會重新從 YouTube 下載影片。')
+    expect(missingFileNextStep(yt({ status: 'running', mode: 'full', version: ANALYSIS_VERSION }))).toBe('這次分析會重新從 YouTube 下載影片。')
+    expect(missingFileNextStep(yt({ status: 'queued', mode: 'full', version: null }))).toBe('這次分析會重新從 YouTube 下載影片。')
+  })
+
+  it('words the missing-file alert by source', () => {
+    const local = missingFileText(v({ status: 'done' }))
+    expect(local).toEqual({
+      title: '找不到原始影片檔',
+      description: '原本的檔案可能被移動、改名或刪除，因此無法預覽，也無法輸出剪輯。逐字稿與精華片段仍然可以查看與修改。',
+      showPath: true,
+      nextStep: '把檔案放回原位置後重新整理這一頁，就能再預覽與輸出剪輯。',
+    })
+    expect(missingFileText(v({ status: 'failed', mode: 'full', version: null })).description).toBe('原本的檔案可能被移動、改名或刪除，因此無法分析、預覽或輸出剪輯。')
+    const youtube = missingFileText({ ...v({ status: 'done' }), sourceKind: 'youtube' })
+    expect(youtube).toEqual({
+      title: '下載的影片檔不見了',
+      description: '下載的影片檔可能被刪除了，因此無法預覽，也無法輸出剪輯。逐字稿與精華片段仍然可以查看與修改。',
+      showPath: false,
+      nextStep: REDOWNLOAD_NEXT_STEP,
+    })
+    expect(missingFileText({ ...v({ status: 'failed', mode: 'full', version: null }), sourceKind: 'youtube' }).description).not.toContain('無法分析')
+    expect(cannotPreviewText({ sourceKind: 'upload' })).toBe('找不到原始影片檔，無法預覽')
+    expect(cannotPreviewText({ sourceKind: 'youtube' })).toBe('下載的影片檔不見了，無法預覽')
+    expect(cannotExportText({})).toBe('找不到原始影片檔，無法輸出')
+    expect(cannotExportText({ sourceKind: 'youtube' })).toBe('下載的影片檔不見了，無法輸出')
+  })
+
   it('tells what to do once the missing source file is back', () => {
     const reload = '把檔案放回原位置後重新整理這一頁，就能再預覽與輸出剪輯。'
     // the workspace is shown: reloading is enough (重試 would transcribe again over the edits)
@@ -261,6 +356,16 @@ describe('analysisProgressText', () => {
     expect(analysisProgressText(v({ status: 'running', step: 'probe' })).hint).toContain('完成後就能看逐字稿')
     expect(analysisProgressText(v({ status: 'running', step: null })).title).toBe('分析中')
     expect(analysisProgressText(v({ status: 'running', step: null, mode: 'highlights' })).title).toBe('正在找精華片段')
+  })
+
+  it('names the download step and the YouTube Signals', () => {
+    expect(analysisProgressText({ ...v({ status: 'running', step: 'download' }), sourceKind: 'youtube' })).toMatchObject({
+      title: '正在下載影片',
+      hint: '正在從 YouTube 下載影片（最高 1080p）',
+    })
+    expect(DOWNLOAD_HINT).toBe('正在從 YouTube 下載影片（最高 1080p）')
+    expect(analysisProgressText({ ...v({ status: 'running', step: 'signals' }), sourceKind: 'youtube' }).title).toBe('正在分析音量、逐字稿、聊天室與重播熱度')
+    expect(analysisProgressText({ ...v({ status: 'running', step: 'signals' }), sourceKind: 'upload' }).title).toBe('正在分析音量與逐字稿')
   })
 
   it('says the workspace stays usable during a highlights-only run', () => {
